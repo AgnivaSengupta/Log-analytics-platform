@@ -219,7 +219,7 @@ func (p *Processor) Flush() ([]*kafka.Message, error) {
 			p.buffer = append(items, p.buffer...)
 			p.mu.Unlock()
 
-			return nil, fmt.Errorf("tinybird append: %w", err)
+			return nil, fmt.Errorf("tinybird append: %w", appendErr)
 		}
 	}
 
