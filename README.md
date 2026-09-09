@@ -67,10 +67,12 @@ curl http://localhost:8080/health
 # Full benchmark suite (throughput + detection + sustained load)
 chmod +x scripts/benchmark.sh
 ./scripts/benchmark.sh
+# Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\benchmark.ps1
 
 # Failure recovery test
 chmod +x scripts/failure-test.sh
 ./scripts/failure-test.sh
+# Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\failure-test.ps1
 
 # Manual load test
 docker compose run --rm load-generator /bin/service \

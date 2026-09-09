@@ -66,6 +66,13 @@ docker compose up -d --build
 ./scripts/init.sh
 ```
 
+On Windows without Git Bash, use the PowerShell equivalent instead of
+`init.sh`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\init.ps1
+```
+
 Ingest a smoke-test event:
 
 ```bash

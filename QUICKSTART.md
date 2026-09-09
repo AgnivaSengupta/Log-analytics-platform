@@ -64,6 +64,7 @@ curl http://localhost:8081/v1/search \
 ```bash
 # Full benchmark suite (throughput + detection tests)
 ./scripts/benchmark.sh
+# Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\benchmark.ps1
 
 # Or run individual tests:
 
@@ -94,6 +95,7 @@ docker compose run --rm load-generator /bin/service \
 ```bash
 # Run the failure recovery test
 ./scripts/failure-test.sh
+# Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\failure-test.ps1
 
 # This will:
 # 1. Start sustained load
