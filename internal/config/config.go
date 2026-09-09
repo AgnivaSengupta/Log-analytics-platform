@@ -13,6 +13,7 @@ type Config struct {
 	Query     QueryConfig
 	Detection DetectionConfig
 	Alert     AlertConfig
+	Worker    WorkerConfig
 }
 
 type KafkaConfig struct {
@@ -62,6 +63,15 @@ type AlertConfig struct {
 	WebhookURL string
 }
 
+// WorkerConfig tunes the processing-worker append pipeline: batches seal every
+// BatchSize events or FlushIntervalMs (whichever first), and up to
+// AppendConcurrency Tinybird appends run in flight per worker process.
+type WorkerConfig struct {
+	BatchSize         int
+	FlushIntervalMs   int
+	AppendConcurrency int
+}
+
 func Load() *Config {
 	return &Config{
 		Kafka: KafkaConfig{
@@ -103,6 +113,11 @@ func Load() *Config {
 		Alert: AlertConfig{
 			Port:       getEnvInt("ALERT_SERVICE_PORT", 8082),
 			WebhookURL: getEnv("ALERT_WEBHOOK_URL", ""),
+		},
+		Worker: WorkerConfig{
+			BatchSize:         getEnvInt("WORKER_BATCH_SIZE", 2000),
+			FlushIntervalMs:   getEnvInt("WORKER_FLUSH_INTERVAL_MS", 250),
+			AppendConcurrency: getEnvInt("WORKER_APPEND_CONCURRENCY", 4),
 		},
 	}
 }

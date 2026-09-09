@@ -95,8 +95,9 @@ Stateless HTTP ingestion gateway. Authenticates producers, validates events, enf
 ### Processing Workers (`cmd/worker`)
 Kafka consumer group that normalizes, enriches, and redacts events before appending them to Tinybird via the Events API (`wait=true`). Commits Kafka offsets only after Tinybird acknowledges the batch.
 
-- **Batch size:** 1000 events or 2-second flush interval
-- **Dead letter queue:** Unparseable events go to `logs-dlq` topic
+- **Pipeline:** poll/normalize loop seals batches (2000 events or 250 ms) into a bounded queue; 4 append workers POST to Tinybird concurrently while polling continues; offsets commit only for the contiguous acknowledged prefix
+- **Tuning:** `WORKER_BATCH_SIZE`, `WORKER_FLUSH_INTERVAL_MS`, `WORKER_APPEND_CONCURRENCY`
+- **Dead letter queue:** Unparseable events go to `logs-dlq` topic (offsets still advance)
 
 ### Archive Writer (`cmd/archive-writer`)
 Independent Kafka consumer that writes raw events to Cloudflare R2 for long-term retention. Preserves original events before normalization for compliance and reprocessing. Commits offsets only after R2 confirms the object write.

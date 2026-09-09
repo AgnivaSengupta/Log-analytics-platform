@@ -28,7 +28,14 @@ func NewClient(cfg config.TinybirdConfig, logger *zap.Logger) (*Client, error) {
 	if cfg.Datasource == "" {
 		return nil, fmt.Errorf("TINYBIRD_DATASOURCE must be configured")
 	}
-	return &Client{baseURL: strings.TrimRight(cfg.APIURL, "/"), appendToken: cfg.AppendToken, readToken: cfg.ReadToken, datasource: cfg.Datasource, http: &http.Client{Timeout: 30 * time.Second}, logger: logger}, nil
+	// Size the keep-alive pool for concurrent appends: several batches per
+	// worker may be in flight at once, and each should reuse a warm TLS
+	// connection instead of re-handshaking against the regional API host.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 64
+	transport.MaxIdleConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
+	return &Client{baseURL: strings.TrimRight(cfg.APIURL, "/"), appendToken: cfg.AppendToken, readToken: cfg.ReadToken, datasource: cfg.Datasource, http: &http.Client{Timeout: 30 * time.Second, Transport: transport}, logger: logger}, nil
 }
 
 // AppendEvents writes a micro-batch and waits for Tinybird to acknowledge it
@@ -41,6 +48,7 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 		return fmt.Errorf("TINYBIRD_APPEND_TOKEN must be configured")
 	}
 	var body bytes.Buffer
+	body.Grow(len(events) * 512)
 	for _, e := range events {
 		// Keep arbitrary attributes as a JSON string. It gives the managed
 		// datasource a stable schema while preserving the complete payload.
@@ -59,7 +67,11 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 	// Gzip the NDJSON batch: log JSON compresses ~10x, which keeps the cloud
 	// append path from becoming network-bound at high event rates.
 	var gzipped bytes.Buffer
-	gz := gzip.NewWriter(&gzipped)
+	gzipped.Grow(body.Len() / 4)
+	gz, err := gzip.NewWriterLevel(&gzipped, gzip.BestSpeed)
+	if err != nil {
+		return err
+	}
 	if _, err := gz.Write(body.Bytes()); err != nil {
 		return err
 	}
