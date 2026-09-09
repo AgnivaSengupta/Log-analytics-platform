@@ -1,0 +1,63 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  filelog:
+    include:
+      - /var/log/**/*.log
+    start_at: end
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+    send_batch_max_size: 5000
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: production
+        action: upsert
+  attributes:
+    actions:
+      - key: source
+        value: otel-collector
+        action: upsert
+
+exporters:
+  otlphttp:
+    endpoint: http://gateway:8080/v1/ingest
+    headers:
+      Content-Type: "application/json"
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, batch, resource, attributes]
+      exporters: [otlphttp, debug]
+  telemetry:
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888

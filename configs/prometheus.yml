@@ -1,0 +1,45 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['gateway:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'worker'
+    static_configs:
+      - targets: ['worker:9091']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'archive-writer'
+    static_configs:
+      - targets: ['archive-writer:9092']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'detection'
+    static_configs:
+      - targets: ['detection:9093']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'query-coordinator'
+    static_configs:
+      - targets: ['query-coordinator:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'alert-service'
+    static_configs:
+      - targets: ['alert-service:9094']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka:9997']
+    scrape_interval: 15s

@@ -1,0 +1,242 @@
+services:
+  # Infrastructure
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9997:9997"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_JMX_PORT: 9997
+      KAFKA_JMX_HOSTNAME: localhost
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.12
+    profiles: ["legacy-local"]
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: log_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: PLACEHOLDER_CLICKHOUSE_PASSWORD
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    profiles: ["legacy-local"]
+    ports:
+      - "9001:9000"
+      - "9002:9001"
+    environment:
+      MINIO_ROOT_USER: PLACEHOLDER_S3_ACCESS_KEY
+      MINIO_ROOT_PASSWORD: PLACEHOLDER_S3_SECRET_KEY
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Application Services
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC_LOGS=logs
+      - KAFKA_TOPIC_DLQ=logs-dlq
+      - GATEWAY_PORT=8080
+      - GATEWAY_INGEST_QUOTA_PER_SEC=100000
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC_LOGS=logs
+      - KAFKA_TOPIC_DLQ=logs-dlq
+      - KAFKA_GROUP_WORKERS=processing-workers
+      - TINYBIRD_API_URL=${TINYBIRD_API_URL}
+      - TINYBIRD_APPEND_TOKEN=${TINYBIRD_APPEND_TOKEN}
+      - TINYBIRD_DATASOURCE=${TINYBIRD_DATASOURCE}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  archive-writer:
+    build:
+      context: .
+      dockerfile: Dockerfile.archive-writer
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC_LOGS=logs
+      - KAFKA_GROUP_ARCHIVE=archive-writers
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_REGION=${S3_REGION}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_ENSURE_BUCKET=false
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  detection:
+    build:
+      context: .
+      dockerfile: Dockerfile.detection
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_TOPIC_LOGS=logs
+      - KAFKA_GROUP_DETECTION=detection-service
+      - DETECTION_WINDOW_MINUTES=5
+      - DETECTION_ERROR_RATE_THRESHOLD=0.05
+      - DETECTION_MIN_EVENTS=100
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  query-coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile.query-coordinator
+    ports:
+      - "8081:8081"
+    environment:
+      - QUERY_COORDINATOR_PORT=8081
+      - TINYBIRD_API_URL=${TINYBIRD_API_URL}
+      - TINYBIRD_READ_TOKEN=${TINYBIRD_READ_TOKEN}
+      - TINYBIRD_DATASOURCE=${TINYBIRD_DATASOURCE}
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_REGION=${S3_REGION}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - QUERY_HOT_RETENTION_DAYS=7
+    restart: unless-stopped
+
+  alert-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.alert-service
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - ALERT_WEBHOOK_URL=PLACEHOLDER_ALERT_WEBHOOK_URL
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # UI
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8081
+    depends_on:
+      - query-coordinator
+    restart: unless-stopped
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+
+  # Load Generator (manual start)
+  load-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile.load-generator
+    environment:
+      - GATEWAY_URL=http://gateway:8080
+    depends_on:
+      - gateway
+    profiles:
+      - benchmark
+
+volumes:
+  clickhouse_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,11 @@
+FROM golang:1.21-alpine AS builder
+RUN apk add --no-cache git gcc musl-dev librdkafka-dev pkgconf
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o /bin/service ./cmd/query-coordinator
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates librdkafka
+COPY --from=builder /bin/service /bin/service
+CMD ["/bin/service"]
