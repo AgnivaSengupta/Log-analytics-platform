@@ -56,15 +56,34 @@ var (
 		Name: "worker_offsets_committed_total",
 		Help: "Total offset commits (only after durable write)",
 	})
+
+	appendLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "worker_append_latency_seconds",
+		Help:    "Tinybird append round-trip latency per batch",
+		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+	})
 )
 
 func init() {
 	prometheus.MustRegister(eventsProcessed, eventsDeadLettered, processingLatency,
-		batchSizeMetric, flushFailures, offsetsCommitted)
+		batchSizeMetric, flushFailures, offsetsCommitted, appendLatency)
 }
 
 // bufferedItem pairs a normalized event with the Kafka message it came from,
 // so we can commit the correct offsets after a durable write.
+// appendBatchSize is the number of buffered events per Tinybird append.
+// Large batches amortize the synchronous Events API round-trip (wait=true),
+// which is the dominant cost in the worker loop.
+const appendBatchSize = 5000
+
+// secretPatterns is compiled once: redactSecrets runs on every event, so
+// compiling these per message would dominate worker CPU at high throughput.
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(password|passwd|secret|token|api_key|apikey|authorization)\s*[:=]\s*\S+`),
+	regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`),
+	regexp.MustCompile(`\b(?:\d{4}[- ]?){3}\d{4}\b`),
+}
+
 type bufferedItem struct {
 	event models.LogEvent
 	msg   *kafka.Message // needed to commit offset after flush
@@ -100,7 +119,7 @@ func NewProcessor(cfg *config.Config, logger *zap.Logger) (*Processor, error) {
 		tinybird: tb,
 		producer: producer,
 		logger:   logger,
-		buffer:   make([]bufferedItem, 0, 1000),
+		buffer:   make([]bufferedItem, 0, appendBatchSize),
 	}, nil
 }
 
@@ -142,14 +161,14 @@ func (p *Processor) addToBuffer(msg *kafka.Message) (shouldFlush bool) {
 		// offset gets tracked. We use a sentinel empty event.
 		p.mu.Lock()
 		p.buffer = append(p.buffer, bufferedItem{msg: msg})
-		shouldFlush = len(p.buffer) >= 1000
+		shouldFlush = len(p.buffer) >= appendBatchSize
 		p.mu.Unlock()
 		return shouldFlush
 	}
 
 	p.mu.Lock()
 	p.buffer = append(p.buffer, bufferedItem{event: *event, msg: msg})
-	shouldFlush = len(p.buffer) >= 1000
+	shouldFlush = len(p.buffer) >= appendBatchSize
 	p.mu.Unlock()
 
 	eventsProcessed.Inc()
@@ -168,7 +187,7 @@ func (p *Processor) Flush() ([]*kafka.Message, error) {
 	}
 
 	items := p.buffer
-	p.buffer = make([]bufferedItem, 0, 1000)
+	p.buffer = make([]bufferedItem, 0, appendBatchSize)
 	p.mu.Unlock()
 
 	// Separate real events from DLQ/dup-only messages
@@ -187,9 +206,12 @@ func (p *Processor) Flush() ([]*kafka.Message, error) {
 
 	// Tinybird acknowledges the batch before its Kafka offsets are committed.
 	if len(events) > 0 {
-		if err := p.tinybird.AppendEvents(ctx, events); err != nil {
+		appendStart := time.Now()
+		appendErr := p.tinybird.AppendEvents(ctx, events)
+		appendLatency.Observe(time.Since(appendStart).Seconds())
+		if appendErr != nil {
 			p.logger.Error("batch insert failed, restoring buffer — offsets NOT committed",
-				zap.Error(err), zap.Int("batch_size", len(events)))
+				zap.Error(appendErr), zap.Int("batch_size", len(events)))
 			flushFailures.Inc()
 
 			// Restore buffer so events aren't lost
@@ -385,12 +407,7 @@ func normalizeSeverity(sev string) string {
 }
 
 func redactSecrets(msg string) string {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(password|passwd|secret|token|api_key|apikey|authorization)\s*[:=]\s*\S+`),
-		regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`),
-		regexp.MustCompile(`\b(?:\d{4}[- ]?){3}\d{4}\b`),
-	}
-	for _, pattern := range patterns {
+	for _, pattern := range secretPatterns {
 		msg = pattern.ReplaceAllString(msg, "[REDACTED]")
 	}
 	return msg

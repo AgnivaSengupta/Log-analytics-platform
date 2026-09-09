@@ -3,6 +3,7 @@ package tinybird
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -55,13 +56,25 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 		body.Write(b)
 		body.WriteByte('\n')
 	}
+	// Gzip the NDJSON batch: log JSON compresses ~10x, which keeps the cloud
+	// append path from becoming network-bound at high event rates.
+	var gzipped bytes.Buffer
+	gz := gzip.NewWriter(&gzipped)
+	if _, err := gz.Write(body.Bytes()); err != nil {
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+
 	u := c.baseURL + "/v0/events?name=" + url.QueryEscape(c.datasource) + "&wait=true"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, &gzipped)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.appendToken)
 	req.Header.Set("Content-Type", "application/x-ndjson")
+	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("events api: %w", err)

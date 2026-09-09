@@ -194,24 +194,21 @@ func (e *Engine) GetWindows() map[string]WindowState {
 	return result
 }
 
+// Fingerprint patterns, compiled once: normalizeMessage runs on every error
+// event, so per-call compilation would dominate detection CPU during spikes.
+var (
+	uuidPattern = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	ipPattern   = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
+	hexPattern  = regexp.MustCompile(`[0-9a-f]{8,}`)
+	numPattern  = regexp.MustCompile(`\b\d+\b`)
+)
+
 // normalizeMessage replaces variable parts of error messages with placeholders.
 func normalizeMessage(msg string) string {
-	// Replace UUIDs
-	uuidRe := regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	msg = uuidRe.ReplaceAllString(msg, "<UUID>")
-
-	// Replace IPs
-	ipRe := regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
-	msg = ipRe.ReplaceAllString(msg, "<IP>")
-
-	// Replace hex strings (>8 chars)
-	hexRe := regexp.MustCompile(`[0-9a-f]{8,}`)
-	msg = hexRe.ReplaceAllString(msg, "<HEX>")
-
-	// Replace numbers
-	numRe := regexp.MustCompile(`\b\d+\b`)
-	msg = numRe.ReplaceAllString(msg, "<N>")
-
+	msg = uuidPattern.ReplaceAllString(msg, "<UUID>")
+	msg = ipPattern.ReplaceAllString(msg, "<IP>")
+	msg = hexPattern.ReplaceAllString(msg, "<HEX>")
+	msg = numPattern.ReplaceAllString(msg, "<N>")
 	return msg
 }
 
