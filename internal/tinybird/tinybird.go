@@ -67,12 +67,12 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 		return fmt.Errorf("events api: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return fmt.Errorf("events api: read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("events api returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return fmt.Errorf("events api returned %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
 	}
 	// wait=true only guarantees an acknowledgement. The payload reports how
 	// many rows were actually committed, so verify it before the caller
@@ -81,9 +81,9 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 		SuccessfulRows  int `json:"successful_rows"`
 		QuarantinedRows int `json:"quarantined_rows"`
 	}
-	if err := json.Unmarshal(body, &ack); err != nil {
+	if err := json.Unmarshal(respBody, &ack); err != nil {
 		c.logger.Warn("events api returned an unexpected acknowledgement payload",
-			zap.String("payload", strings.TrimSpace(string(body))))
+			zap.String("payload", strings.TrimSpace(string(respBody))))
 		return nil
 	}
 	if ack.QuarantinedRows > 0 {
