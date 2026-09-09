@@ -28,6 +28,10 @@ fi
 echo "✅ Gateway is healthy"
 echo ""
 
+# Rebuild the load-generator so -report and the latest flags exist
+# (profile-gated services are skipped by a plain 'up --build').
+docker compose --profile benchmark build load-generator
+
 # ==========================================
 # Test 1: Throughput Stepping
 # ==========================================
