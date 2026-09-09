@@ -4,6 +4,12 @@ A production-grade distributed log analytics system built with Go, Kafka, Tinybi
 
 Kafka, the gateways, workers, detection, alerting, and the UI run in Docker. Tinybird is the managed hot analytics store and Cloudflare R2 is the managed raw archive. No local database or object-store containers are used.
 
+> **📐 Design & architecture:** [`ARCHITECTURE.md`](ARCHITECTURE.md) is the full
+> reference for the system as built — component contracts, the durability
+> handshake, delivery semantics, backpressure, the capacity/scaling model,
+> failure and replay procedures, security boundaries, and a table of known
+> limitations and defects with `file:line` evidence.
+
 ## Architecture
 
 ```
