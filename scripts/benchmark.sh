@@ -37,12 +37,13 @@ echo "  10K → 25K → 50K → 100K events/sec"
 echo "═══════════════════════════════════════════"
 echo ""
 
-docker compose run --rm load-generator /bin/service \
+docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$GATEWAY_URL" \
     -step \
     -workers 20 \
     -batch 200 \
     -error-rate 0.002 \
+    -report /reports/throughput-report.json \
     2>&1 | tee "$RESULTS_DIR/throughput-test.log"
 
 echo ""
@@ -55,13 +56,14 @@ echo "  TEST 2: SUSTAINED LOAD (50K/sec, 5min)"
 echo "═══════════════════════════════════════════"
 echo ""
 
-docker compose run --rm load-generator /bin/service \
+docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$GATEWAY_URL" \
     -rate 50000 \
     -duration 300s \
     -workers 20 \
     -batch 200 \
     -error-rate 0.002 \
+    -report /reports/sustained-report.json \
     2>&1 | tee "$RESULTS_DIR/sustained-test.log"
 
 echo ""
@@ -77,26 +79,28 @@ echo ""
 
 # Phase 1: Normal error rate
 echo "Phase 1: Normal traffic (0.2% errors, 60s)..."
-docker compose run --rm load-generator /bin/service \
+docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$GATEWAY_URL" \
     -rate 25000 \
     -duration 60s \
     -workers 10 \
     -batch 100 \
     -error-rate 0.002 \
+    -report /reports/detection-phase1-report.json \
     2>&1 | tee "$RESULTS_DIR/detection-phase1.log"
 
 echo ""
 
 # Phase 2: Spike errors
 echo "Phase 2: Error spike (8% errors, 120s)..."
-docker compose run --rm load-generator /bin/service \
+docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$GATEWAY_URL" \
     -rate 25000 \
     -duration 120s \
     -workers 10 \
     -batch 100 \
     -error-rate 0.08 \
+    -report /reports/detection-phase2-report.json \
     2>&1 | tee "$RESULTS_DIR/detection-phase2.log"
 
 echo ""
@@ -109,6 +113,7 @@ echo "  BENCHMARK COMPLETE"
 echo "═══════════════════════════════════════════"
 echo ""
 echo "Results saved to: $RESULTS_DIR/"
+echo "(per-step JSON reports are the *-report.json files)"
 ls -la "$RESULTS_DIR/"
 echo ""
 echo "View Grafana dashboards at: http://localhost:3001"
