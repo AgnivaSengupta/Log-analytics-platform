@@ -38,8 +38,3 @@ scrape_configs:
       - targets: ['alert-service:9094']
     metrics_path: '/metrics'
     scrape_interval: 5s
-
-  - job_name: 'kafka'
-    static_configs:
-      - targets: ['kafka:9997']
-    scrape_interval: 15s
