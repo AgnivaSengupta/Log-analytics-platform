@@ -11,6 +11,21 @@ LOAD_GATEWAY_URL="${LOAD_GATEWAY_URL:-http://gateway:8080}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${SCRIPT_DIR}/../benchmark-results"
 
+# Quick mode is the default (~5 minutes total). Set BENCHMARK_MODE=full
+# for the original ~15-minute suite.
+BENCHMARK_MODE="${BENCHMARK_MODE:-quick}"
+if [ "$BENCHMARK_MODE" = "full" ]; then
+    QUICK_FLAG=""
+    SUSTAINED_SECS=300
+    DETECT_P1_SECS=60
+    DETECT_P2_SECS=120
+else
+    QUICK_FLAG="-quick"
+    SUSTAINED_SECS=120
+    DETECT_P1_SECS=30
+    DETECT_P2_SECS=60
+fi
+
 mkdir -p "$RESULTS_DIR"
 
 echo "╔══════════════════════════════════════════════════╗"
@@ -20,6 +35,7 @@ echo ""
 echo "Gateway: $GATEWAY_URL"
 echo "Load target: $LOAD_GATEWAY_URL"
 echo "Results: $RESULTS_DIR"
+echo "Mode: $BENCHMARK_MODE (BENCHMARK_MODE=full for the full suite)"
 echo ""
 
 # Check gateway is available
@@ -48,6 +64,7 @@ echo ""
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$LOAD_GATEWAY_URL" \
     -step \
+    $QUICK_FLAG \
     -workers 20 \
     -batch 200 \
     -error-rate 0.002 \
@@ -57,17 +74,17 @@ docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
 echo ""
 
 # ==========================================
-# Test 2: Sustained 50K for 5 minutes
+# Test 2: Sustained 50K (duration depends on BENCHMARK_MODE)
 # ==========================================
 echo "═══════════════════════════════════════════"
-echo "  TEST 2: SUSTAINED LOAD (50K/sec, 5min)"
+echo "  TEST 2: SUSTAINED LOAD (50K/sec, ${SUSTAINED_SECS}s)"
 echo "═══════════════════════════════════════════"
 echo ""
 
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$LOAD_GATEWAY_URL" \
     -rate 50000 \
-    -duration 300s \
+    -duration ${SUSTAINED_SECS}s \
     -workers 20 \
     -batch 200 \
     -error-rate 0.002 \
@@ -86,11 +103,11 @@ echo "════════════════════════�
 echo ""
 
 # Phase 1: Normal error rate
-echo "Phase 1: Normal traffic (0.2% errors, 60s)..."
+echo "Phase 1: Normal traffic (0.2% errors, ${DETECT_P1_SECS}s)..."
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$LOAD_GATEWAY_URL" \
     -rate 25000 \
-    -duration 60s \
+    -duration ${DETECT_P1_SECS}s \
     -workers 10 \
     -batch 100 \
     -error-rate 0.002 \
@@ -100,11 +117,11 @@ docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
 echo ""
 
 # Phase 2: Spike errors
-echo "Phase 2: Error spike (8% errors, 120s)..."
+echo "Phase 2: Error spike (8% errors, ${DETECT_P2_SECS}s)..."
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
     -gateway "$LOAD_GATEWAY_URL" \
     -rate 25000 \
-    -duration 120s \
+    -duration ${DETECT_P2_SECS}s \
     -workers 10 \
     -batch 100 \
     -error-rate 0.08 \

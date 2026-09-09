@@ -64,7 +64,7 @@ curl http://localhost:8080/health
 ### Run Benchmarks
 
 ```bash
-# Full benchmark suite (throughput + detection + sustained load)
+# Benchmark suite: quick by default (~5 min); BENCHMARK_MODE=full for the full ~15-min suite
 chmod +x scripts/benchmark.sh
 ./scripts/benchmark.sh
 # Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\benchmark.ps1

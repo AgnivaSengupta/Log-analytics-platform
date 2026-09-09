@@ -13,6 +13,16 @@ $ResultsDir = Join-Path (Join-Path $ScriptDir '..') 'benchmark-results'
 New-Item -ItemType Directory -Force -Path $ResultsDir | Out-Null
 # Docker prefers forward slashes for -v host paths
 $ResultsMount = $ResultsDir.Replace('\', '/')
+# Quick mode is the default (~5 minutes total). Set $env:BENCHMARK_MODE='full'
+# for the original ~15-minute suite.
+$BenchmarkMode = if ($env:BENCHMARK_MODE) { $env:BENCHMARK_MODE } else { 'quick' }
+if ($BenchmarkMode -eq 'full') {
+    $QuickFlag = @()
+    $SustainedSecs = '300'; $DetectP1Secs = '60'; $DetectP2Secs = '120'
+} else {
+    $QuickFlag = @('-quick')
+    $SustainedSecs = '120'; $DetectP1Secs = '30'; $DetectP2Secs = '60'
+}
 
 Write-Host '==========================================='
 Write-Host '  Benchmark Suite'
@@ -20,6 +30,7 @@ Write-Host '==========================================='
 Write-Host ''
 Write-Host "Gateway: $GatewayUrl"
 Write-Host "Results: $ResultsDir"
+Write-Host "Mode: $BenchmarkMode (BENCHMARK_MODE=full for the full suite)"
 Write-Host "Load target: $LoadGatewayUrl"
 Write-Host ''
 
@@ -53,20 +64,20 @@ function Invoke-LoadTest {
 Write-Host '==========================================='
 Write-Host '  TEST 1: THROUGHPUT STEPPING (10K -> 100K)'
 Write-Host '==========================================='
-Invoke-LoadTest -LogName 'throughput-test.log' -ReportName 'throughput-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-step', '-workers', '20', '-batch', '200', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'throughput-test.log' -ReportName 'throughput-report.json' -LoadArgs (@('-gateway', $LoadGatewayUrl, '-step') + $QuickFlag + @('-workers', '20', '-batch', '200', '-error-rate', '0.002'))
 
 Write-Host '==========================================='
-Write-Host '  TEST 2: SUSTAINED LOAD (50K/sec, 5min)'
+Write-Host "  TEST 2: SUSTAINED LOAD (50K/sec, ${SustainedSecs}s)"
 Write-Host '==========================================='
-Invoke-LoadTest -LogName 'sustained-test.log' -ReportName 'sustained-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '50000', '-duration', '300s', '-workers', '20', '-batch', '200', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'sustained-test.log' -ReportName 'sustained-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '50000', '-duration', "${SustainedSecs}s", '-workers', '20', '-batch', '200', '-error-rate', '0.002')
 
 Write-Host '==========================================='
 Write-Host '  TEST 3: ERROR RATE SPIKE (DETECTION)'
 Write-Host '==========================================='
-Write-Host 'Phase 1: Normal traffic (0.2% errors, 60s)...'
-Invoke-LoadTest -LogName 'detection-phase1.log' -ReportName 'detection-phase1-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', '60s', '-workers', '10', '-batch', '100', '-error-rate', '0.002')
-Write-Host 'Phase 2: Error spike (8% errors, 120s)...'
-Invoke-LoadTest -LogName 'detection-phase2.log' -ReportName 'detection-phase2-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', '120s', '-workers', '10', '-batch', '100', '-error-rate', '0.08')
+Write-Host "Phase 1: Normal traffic (0.2% errors, ${DetectP1Secs}s)..."
+Invoke-LoadTest -LogName 'detection-phase1.log' -ReportName 'detection-phase1-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', "${DetectP1Secs}s", '-workers', '10', '-batch', '100', '-error-rate', '0.002')
+Write-Host "Phase 2: Error spike (8% errors, ${DetectP2Secs}s)..."
+Invoke-LoadTest -LogName 'detection-phase2.log' -ReportName 'detection-phase2-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', "${DetectP2Secs}s", '-workers', '10', '-batch', '100', '-error-rate', '0.08')
 
 Write-Host '==========================================='
 Write-Host '  BENCHMARK COMPLETE'

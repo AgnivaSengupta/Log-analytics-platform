@@ -24,6 +24,7 @@ var (
 	errorRate     = flag.Float64("error-rate", 0.002, "Error rate (0.0-1.0)")
 	numWorkers    = flag.Int("workers", 10, "Number of concurrent workers")
 	stepMode      = flag.Bool("step", false, "Step mode: 10K → 25K → 50K → 100K")
+	quickMode     = flag.Bool("quick", false, "Quick mode: halve step durations")
 	reportPath    = flag.String("report", "", "Write JSON report to this file (default: print to stdout)")
 )
 
@@ -362,15 +363,21 @@ func main() {
 	fmt.Printf("Gateway: %s\n", *gatewayURL)
 
 	if *stepMode {
+		// -quick halves the step durations (and cooldown) for a ~1.5-minute
+		// stepping test instead of ~3.5 minutes.
+		stepShort, stepLong, cooldown := 30*time.Second, 60*time.Second, 5*time.Second
+		if *quickMode {
+			stepShort, stepLong, cooldown = 15*time.Second, 30*time.Second, 2*time.Second
+		}
 		steps := []struct {
 			name string
 			rate int
 			dur  time.Duration
 		}{
-			{"10K", 10000, 30 * time.Second},
-			{"25K", 25000, 30 * time.Second},
-			{"50K", 50000, 60 * time.Second},
-			{"100K", 100000, 60 * time.Second},
+			{"10K", 10000, stepShort},
+			{"25K", 25000, stepShort},
+			{"50K", 50000, stepLong},
+			{"100K", 100000, stepLong},
 		}
 
 		report := Report{Gateway: *gatewayURL, Timestamp: time.Now()}
@@ -379,7 +386,7 @@ func main() {
 			startTime := runTest(step.rate, step.dur, *errorRate, metrics)
 			printMetrics(metrics, startTime, step.rate)
 			report.Steps = append(report.Steps, stepResult(step.name, step.rate, metrics, startTime))
-			time.Sleep(5 * time.Second) // Cool down between steps
+			time.Sleep(cooldown) // Cool down between steps
 		}
 		writeReport(report)
 	} else {

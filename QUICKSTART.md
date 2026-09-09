@@ -62,7 +62,7 @@ curl http://localhost:8081/v1/search \
 ## 4. Run Benchmarks
 
 ```bash
-# Full benchmark suite (throughput + detection tests)
+# Benchmark suite: quick by default (~5 min); BENCHMARK_MODE=full for the full ~15-min suite
 ./scripts/benchmark.sh
 # Windows PowerShell: powershell -ExecutionPolicy Bypass -File .\scripts\benchmark.ps1
 
