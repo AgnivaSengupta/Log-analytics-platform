@@ -10,8 +10,10 @@ scrape_configs:
     scrape_interval: 5s
 
   - job_name: 'worker'
-    static_configs:
-      - targets: ['worker:9091']
+    dns_sd_configs:
+      - names: ['worker']
+        type: 'A'
+        port: 9091
     metrics_path: '/metrics'
     scrape_interval: 5s
 
@@ -38,8 +40,3 @@ scrape_configs:
       - targets: ['alert-service:9094']
     metrics_path: '/metrics'
     scrape_interval: 5s
-
-  - job_name: 'kafka'
-    static_configs:
-      - targets: ['kafka:9997']
-    scrape_interval: 15s

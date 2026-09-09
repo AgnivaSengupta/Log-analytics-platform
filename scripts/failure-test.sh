@@ -4,6 +4,7 @@
 set -e
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
+LOAD_GATEWAY_URL="${LOAD_GATEWAY_URL:-http://gateway:8080}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "╔══════════════════════════════════════════════════╗"
@@ -14,7 +15,7 @@ echo ""
 # Start sustained load in background
 echo "Starting sustained load (25K events/sec)..."
 docker compose run -d --name load-test --rm load-generator /bin/service \
-    -gateway "$GATEWAY_URL" \
+    -gateway "$LOAD_GATEWAY_URL" \
     -rate 25000 \
     -duration 180s \
     -workers 10 \

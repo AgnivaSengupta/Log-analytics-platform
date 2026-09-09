@@ -1,0 +1,282 @@
+{
+  "title": "Log Analytics Platform",
+  "uid": "log-analytics",
+  "tags": ["log-analytics"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Ingestion (Gateway)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Events ingested / sec by status",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 2,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (status) (rate(gateway_events_ingested_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway p95 ingest latency",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_ingest_latency_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rejected events / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(gateway_events_rejected_total[5m])",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Processing & Archive",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "id": 5,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker processed / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+      "id": 6,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(worker_events_processed_total[5m])",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker failures / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+      "id": 7,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(worker_flush_failures_total[5m])",
+          "legendFormat": "tinybird flush failures",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(worker_events_dead_lettered_total[5m])",
+          "legendFormat": "dead-lettered",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Archived to R2 / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+      "id": 8,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(archive_events_total[5m])",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Detection & Alerts",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 9,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Detection throughput / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "id": 10,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(detection_events_processed_total[5m])",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Alerts fired / sec",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "id": 11,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(detection_alerts_fired_total[5m])",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Alert notifications / sec by status",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "id": 12,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (status) (rate(alert_service_sent_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Query Coordinator",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "id": 13,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Queries / sec by tier",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 14,
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (source) (rate(query_coordinator_queries_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Query p95 latency by tier",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "id": 15,
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, source) (rate(query_coordinator_latency_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Sink Latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "id": 16,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker Tinybird append p95 per batch",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
+      "id": 17,
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(worker_append_latency_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

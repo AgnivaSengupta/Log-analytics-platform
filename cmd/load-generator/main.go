@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +24,8 @@ var (
 	errorRate     = flag.Float64("error-rate", 0.002, "Error rate (0.0-1.0)")
 	numWorkers    = flag.Int("workers", 10, "Number of concurrent workers")
 	stepMode      = flag.Bool("step", false, "Step mode: 10K → 25K → 50K → 100K")
+	quickMode     = flag.Bool("quick", false, "Quick mode: halve step durations")
+	reportPath    = flag.String("report", "", "Write JSON report to this file (default: print to stdout)")
 )
 
 var services = []string{
@@ -194,6 +198,103 @@ func runWorker(id int, rate int, batchSz int, targetErrRate float64, stop <-chan
 	}
 }
 
+type LatencyStats struct {
+	Samples int     `json:"samples"`
+	MinMs   float64 `json:"min_ms"`
+	AvgMs   float64 `json:"avg_ms"`
+	P50Ms   float64 `json:"p50_ms"`
+	P95Ms   float64 `json:"p95_ms"`
+	P99Ms   float64 `json:"p99_ms"`
+	MaxMs   float64 `json:"max_ms"`
+}
+
+type StepResult struct {
+	Name          string       `json:"name"`
+	TargetRate    int          `json:"target_rate"`
+	DurationSec   float64      `json:"duration_sec"`
+	Sent          int64        `json:"sent"`
+	Accepted      int64        `json:"accepted"`
+	Rejected      int64        `json:"rejected"`
+	Failed        int64        `json:"failed"`
+	ActualRate    float64      `json:"actual_rate"`
+	AcceptedRate  float64      `json:"accepted_rate"`
+	AcceptancePct float64      `json:"acceptance_pct"`
+	Latency       LatencyStats `json:"latency"`
+}
+
+type Report struct {
+	Gateway   string       `json:"gateway"`
+	Timestamp time.Time    `json:"timestamp"`
+	Steps     []StepResult `json:"steps"`
+}
+
+func latencyStats(metrics *Metrics) LatencyStats {
+	var all []float64
+	metrics.Latencies.Range(func(_, v interface{}) bool {
+		if latencies, ok := v.([]time.Duration); ok {
+			for _, d := range latencies {
+				all = append(all, float64(d.Microseconds())/1000.0)
+			}
+		}
+		return true
+	})
+	stats := LatencyStats{Samples: len(all)}
+	if len(all) == 0 {
+		return stats
+	}
+	sort.Float64s(all)
+	var sum float64
+	for _, ms := range all {
+		sum += ms
+	}
+	stats.MinMs = all[0]
+	stats.MaxMs = all[len(all)-1]
+	stats.AvgMs = sum / float64(len(all))
+	stats.P50Ms = all[int(float64(len(all))*0.50)]
+	stats.P95Ms = all[int(float64(len(all))*0.95)]
+	stats.P99Ms = all[int(float64(len(all))*0.99)]
+	return stats
+}
+
+func stepResult(name string, rate int, metrics *Metrics, startTime time.Time) StepResult {
+	elapsed := time.Since(startTime).Seconds()
+	sent := metrics.TotalSent.Load()
+	accepted := metrics.TotalAccepted.Load()
+	res := StepResult{
+		Name:         name,
+		TargetRate:   rate,
+		DurationSec:  elapsed,
+		Sent:         sent,
+		Accepted:     accepted,
+		Rejected:     metrics.TotalRejected.Load(),
+		Failed:       metrics.TotalFailed.Load(),
+		ActualRate:   float64(sent) / elapsed,
+		AcceptedRate: float64(accepted) / elapsed,
+		Latency:      latencyStats(metrics),
+	}
+	if sent > 0 {
+		res.AcceptancePct = float64(accepted) / float64(sent) * 100
+	}
+	return res
+}
+
+func writeReport(report Report) {
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		fmt.Printf("failed to encode report: %v\n", err)
+		return
+	}
+	if *reportPath != "" {
+		if err := os.WriteFile(*reportPath, data, 0644); err != nil {
+			fmt.Printf("failed to write report to %s: %v\n", *reportPath, err)
+			return
+		}
+		fmt.Printf("JSON report written to %s\n", *reportPath)
+		return
+	}
+	fmt.Printf("\n--- JSON report ---\n%s\n", string(data))
+}
+
 func printMetrics(metrics *Metrics, startTime time.Time, rate int) {
 	elapsed := time.Since(startTime).Seconds()
 	sent := metrics.TotalSent.Load()
@@ -214,6 +315,8 @@ func printMetrics(metrics *Metrics, startTime time.Time, rate int) {
 	if sent > 0 {
 		fmt.Printf("  Acceptance Rate:    %.2f%%\n", float64(accepted)/float64(sent)*100)
 	}
+	lat := latencyStats(metrics)
+	fmt.Printf("  Latency (ms):       p50=%.1f p95=%.1f p99=%.1f avg=%.1f (n=%d)\n", lat.P50Ms, lat.P95Ms, lat.P99Ms, lat.AvgMs, lat.Samples)
 	fmt.Printf("═══════════════════════════════════════════════\n\n")
 }
 
@@ -260,25 +363,40 @@ func main() {
 	fmt.Printf("Gateway: %s\n", *gatewayURL)
 
 	if *stepMode {
+		// -quick halves the step durations (and cooldown) for a ~1.5-minute
+		// stepping test instead of ~3.5 minutes.
+		stepShort, stepLong, cooldown := 30*time.Second, 60*time.Second, 5*time.Second
+		if *quickMode {
+			stepShort, stepLong, cooldown = 15*time.Second, 30*time.Second, 2*time.Second
+		}
 		steps := []struct {
+			name string
 			rate int
 			dur  time.Duration
 		}{
-			{10000, 30 * time.Second},
-			{25000, 30 * time.Second},
-			{50000, 60 * time.Second},
-			{100000, 60 * time.Second},
+			{"10K", 10000, stepShort},
+			{"25K", 25000, stepShort},
+			{"50K", 50000, stepLong},
+			{"100K", 100000, stepLong},
 		}
 
+		report := Report{Gateway: *gatewayURL, Timestamp: time.Now()}
 		for _, step := range steps {
 			metrics := &Metrics{}
 			startTime := runTest(step.rate, step.dur, *errorRate, metrics)
 			printMetrics(metrics, startTime, step.rate)
-			time.Sleep(5 * time.Second) // Cool down between steps
+			report.Steps = append(report.Steps, stepResult(step.name, step.rate, metrics, startTime))
+			time.Sleep(cooldown) // Cool down between steps
 		}
+		writeReport(report)
 	} else {
 		metrics := &Metrics{}
 		startTime := runTest(*targetRate, *duration, *errorRate, metrics)
 		printMetrics(metrics, startTime, *targetRate)
+		writeReport(Report{
+			Gateway:   *gatewayURL,
+			Timestamp: startTime,
+			Steps:     []StepResult{stepResult("single", *targetRate, metrics, startTime)},
+		})
 	}
 }

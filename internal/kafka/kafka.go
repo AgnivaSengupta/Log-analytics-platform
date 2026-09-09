@@ -205,8 +205,18 @@ func NewConsumer(cfg config.KafkaConfig, groupID string, topics []string, logger
 		"group.id":              groupID,
 		"auto.offset.reset":     "earliest",
 		"enable.auto.commit":    false,
-		"session.timeout.ms":    6000,
-		"heartbeat.interval.ms": 2000,
+		"session.timeout.ms":    30000,
+		"heartbeat.interval.ms": 3000,
+		// The worker's batch channel is real backpressure: when the Tinybird sink
+		// stalls, sealing blocks and polls pause. A long max.poll.interval keeps
+		// the group from evicting a healthy-but-waiting consumer (heartbeats
+		// still flow on the background thread, so truly dead processes are
+		// detected via session.timeout as usual).
+		"max.poll.interval.ms":       1800000,
+		// Deep local prefetch so a draining consumer never starves between
+		// fetches, and a short fetch wait so idle latency stays low.
+		"queued.max.messages.kbytes": 65536,
+		"fetch.wait.max.ms":          100,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kafka consumer: %w", err)

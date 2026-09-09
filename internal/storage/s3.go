@@ -20,15 +20,31 @@ import (
 	"github.com/log-analytics-platform/internal/models"
 )
 
-// S3Client wraps the AWS S3 client for object storage operations.
+// S3Client talks to Cloudflare R2 over its S3-compatible API. The type and
+// S3_* setting names refer to the API dialect, not to AWS: the endpoint is
+// always the account-specific R2 endpoint.
 type S3Client struct {
 	client *s3.S3
 	bucket string
 	logger *zap.Logger
 }
 
-// NewS3Client creates a new S3/MinIO client.
+// NewS3Client creates a client for the Cloudflare R2 archive bucket. The
+// endpoint must be the account-specific R2 S3 endpoint
+// (https://<account-id>.r2.cloudflarestorage.com) and the region should stay
+// "auto". The bucket and its API token are provisioned in the Cloudflare
+// dashboard (see MANAGED_SERVICES_SETUP.md), not by this service.
 func NewS3Client(cfg config.S3Config, logger *zap.Logger) (*S3Client, error) {
+	if cfg.Endpoint == "" {
+		return nil, fmt.Errorf("S3_ENDPOINT must be configured (https://<account-id>.r2.cloudflarestorage.com)")
+	}
+	if cfg.Bucket == "" {
+		return nil, fmt.Errorf("S3_BUCKET must be configured")
+	}
+	if cfg.AccessKey == "" || cfg.SecretKey == "" {
+		return nil, fmt.Errorf("S3_ACCESS_KEY and S3_SECRET_KEY must be configured with an R2 API token")
+	}
+
 	sess, err := session.NewSession(&aws.Config{
 		Region:           aws.String(cfg.Region),
 		Endpoint:         aws.String(cfg.Endpoint),
@@ -36,7 +52,7 @@ func NewS3Client(cfg config.S3Config, logger *zap.Logger) (*S3Client, error) {
 		S3ForcePathStyle: aws.Bool(true),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create S3 session: %w", err)
+		return nil, fmt.Errorf("failed to create R2 session: %w", err)
 	}
 
 	return &S3Client{
@@ -46,7 +62,9 @@ func NewS3Client(cfg config.S3Config, logger *zap.Logger) (*S3Client, error) {
 	}, nil
 }
 
-// EnsureBucket creates the bucket if it doesn't exist.
+// EnsureBucket creates the bucket if it doesn't exist. R2 buckets are
+// normally created in the Cloudflare dashboard, so production deployments
+// leave S3_ENSURE_BUCKET=false and never call this.
 func (s *S3Client) EnsureBucket(ctx context.Context) error {
 	_, err := s.client.CreateBucketWithContext(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(s.bucket),
@@ -55,7 +73,7 @@ func (s *S3Client) EnsureBucket(ctx context.Context) error {
 		!strings.Contains(err.Error(), "BucketAlreadyExists") {
 		return fmt.Errorf("create bucket failed: %w", err)
 	}
-	s.logger.Info("S3 bucket ready", zap.String("bucket", s.bucket))
+	s.logger.Info("R2 bucket ready", zap.String("bucket", s.bucket))
 	return nil
 }
 
@@ -97,7 +115,7 @@ func (s *S3Client) ArchiveEvents(ctx context.Context, events []models.LogEvent) 
 		return fmt.Errorf("put object failed: %w", err)
 	}
 
-	s.logger.Debug("archived events to S3",
+	s.logger.Debug("archived events to R2",
 		zap.String("key", key),
 		zap.Int("count", len(events)))
 
@@ -145,7 +163,7 @@ func (s *S3Client) ArchiveRawBatch(ctx context.Context, ts time.Time, service st
 		return fmt.Errorf("put raw batch failed: %w", err)
 	}
 
-	s.logger.Debug("archived raw batch to S3",
+	s.logger.Debug("archived raw batch to R2",
 		zap.String("key", key),
 		zap.Int("count", len(items)))
 

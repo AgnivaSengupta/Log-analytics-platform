@@ -44,41 +44,130 @@ var (
 	batchSizeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "worker_batch_size",
 		Help:    "Batch size for Tinybird appends",
-		Buckets: []float64{1, 10, 50, 100, 500, 1000, 5000},
+		Buckets: []float64{1, 10, 50, 100, 500, 1000, 2000, 5000},
 	})
 
 	flushFailures = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_flush_failures_total",
-		Help: "Total Tinybird flush failures",
+		Help: "Total failed Tinybird append attempts (each is retried)",
 	})
 
 	offsetsCommitted = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_offsets_committed_total",
 		Help: "Total offset commits (only after durable write)",
 	})
+
+	appendLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "worker_append_latency_seconds",
+		Help:    "Tinybird append round-trip latency per batch",
+		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+	})
+
+	appendInflight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "worker_append_inflight",
+		Help: "Tinybird appends currently in flight",
+	})
+
+	batchesPending = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "worker_batches_pending",
+		Help: "Sealed batches waiting for an append slot",
+	})
 )
 
 func init() {
 	prometheus.MustRegister(eventsProcessed, eventsDeadLettered, processingLatency,
-		batchSizeMetric, flushFailures, offsetsCommitted)
+		batchSizeMetric, flushFailures, offsetsCommitted, appendLatency,
+		appendInflight, batchesPending)
 }
 
-// bufferedItem pairs a normalized event with the Kafka message it came from,
-// so we can commit the correct offsets after a durable write.
-type bufferedItem struct {
-	event models.LogEvent
-	msg   *kafka.Message // needed to commit offset after flush
+// Pipeline design
+//
+// The worker is a three-stage pipeline so that the slow step (HTTPS append to
+// Tinybird, wait=true) never blocks the fast steps (Kafka poll + normalize):
+//
+//	poll/normalize (1 goroutine) -> sealed batches (bounded chan)
+//		-> append workers (N goroutines) -> completions (chan)
+//		-> committer (1 goroutine)
+//
+//   - The poll loop seals a batch every batchSize events or flushInterval,
+//     whichever comes first, and keeps polling while appends are in flight.
+//   - N append workers POST batches concurrently with backoff retries.
+//   - The committer commits offsets only for the contiguous prefix of
+//     acknowledged batches, so at-least-once ordering is preserved even when
+//     appends finish out of order.
+//   - The bounded batch channel is the backpressure valve: when Tinybird is
+//     slow, sealing blocks, polling pauses, and Kafka (not worker RAM) holds
+//     the backlog.
+
+// secretPatterns is compiled once: redactSecrets runs on every event, so
+// compiling these per message would dominate worker CPU at high throughput.
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(password|passwd|secret|token|api_key|apikey|authorization)\s*[:=]\s*\S+`),
+	regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`),
+	regexp.MustCompile(`\b(?:\d{4}[- ]?){3}\d{4}\b`),
 }
 
-// Processor handles event normalization, enrichment, and redaction.
+// sealedBatch is a batch sealed by the poll loop, in poll order. seq numbers
+// are dense (0, 1, 2, ...) so the committer can detect a contiguous prefix.
+type sealedBatch struct {
+	seq    uint64
+	events []models.LogEvent
+	msgs   []*kafka.Message
+}
+
+// completedBatch reports a durably appended batch back to the committer. Only
+// TopicPartitions are kept so out-of-order completions don't pin full payloads.
+// err is non-nil only when shutting down mid-retry; the committer must not
+// advance offsets past a failed batch.
+type completedBatch struct {
+	seq     uint64
+	offsets []kafka.TopicPartition
+	err     error
+}
+
+// batcher accumulates normalized events until sealed by size or time. It is
+// owned by the poll goroutine only — no locking needed.
+type batcher struct {
+	maxSize int
+	events  []models.LogEvent
+	msgs    []*kafka.Message
+}
+
+func newBatcher(maxSize int) *batcher {
+	return &batcher{
+		maxSize: maxSize,
+		events:  make([]models.LogEvent, 0, maxSize),
+		msgs:    make([]*kafka.Message, 0, maxSize),
+	}
+}
+
+func (b *batcher) add(event models.LogEvent, msg *kafka.Message) {
+	b.events = append(b.events, event)
+	b.msgs = append(b.msgs, msg)
+}
+
+// addCommitOnly tracks a DLQ'd message: no event to append, but its offset
+// must still advance so it isn't re-processed forever.
+func (b *batcher) addCommitOnly(msg *kafka.Message) {
+	b.msgs = append(b.msgs, msg)
+}
+
+func (b *batcher) len() int      { return len(b.msgs) }
+func (b *batcher) empty() bool   { return len(b.msgs) == 0 }
+func (b *batcher) full() bool    { return len(b.msgs) >= b.maxSize }
+func (b *batcher) seal(seq uint64) *sealedBatch {
+	sb := &sealedBatch{seq: seq, events: b.events, msgs: b.msgs}
+	b.events = make([]models.LogEvent, 0, b.maxSize)
+	b.msgs = make([]*kafka.Message, 0, b.maxSize)
+	return sb
+}
+
+// Processor handles event normalization, enrichment, redaction, and appends.
 type Processor struct {
 	cfg      *config.Config
 	tinybird *tinybird.Client
 	producer *kafkalib.Producer
 	logger   *zap.Logger
-
-	mu     sync.Mutex
-	buffer []bufferedItem
 }
 
 func NewProcessor(cfg *config.Config, logger *zap.Logger) (*Processor, error) {
@@ -100,7 +189,6 @@ func NewProcessor(cfg *config.Config, logger *zap.Logger) (*Processor, error) {
 		tinybird: tb,
 		producer: producer,
 		logger:   logger,
-		buffer:   make([]bufferedItem, 0, 1000),
 	}, nil
 }
 
@@ -123,90 +211,96 @@ func (p *Processor) normalize(raw []byte) (*models.LogEvent, error) {
 	return &event, nil
 }
 
-// addToBuffer normalizes the message and adds it to the buffer.
-// Returns true if the buffer has reached the flush threshold.
-// Does NOT commit any offsets — that happens only after a durable write.
-func (p *Processor) addToBuffer(msg *kafka.Message) (shouldFlush bool) {
+// bufferOne normalizes a message into the open batch. It reports whether the
+// batch reached the size threshold and should be sealed. Offsets are never
+// committed here — only the committer advances them, after a durable write.
+func (p *Processor) bufferOne(b *batcher, msg *kafka.Message) (shouldSeal bool) {
 	start := time.Now()
-	defer func() {
-		processingLatency.Observe(time.Since(start).Seconds())
-	}()
-
 	event, err := p.normalize(msg.Value)
+	processingLatency.Observe(time.Since(start).Seconds())
+
 	if err != nil {
 		p.sendToDLQ(msg.Value, err)
 		eventsDeadLettered.Inc()
-		// DLQ'd messages still need their offset committed so we don't
-		// re-process them forever. The caller commits after flush, and
-		// we include the msg in the buffer (with no event) so its
-		// offset gets tracked. We use a sentinel empty event.
-		p.mu.Lock()
-		p.buffer = append(p.buffer, bufferedItem{msg: msg})
-		shouldFlush = len(p.buffer) >= 1000
-		p.mu.Unlock()
-		return shouldFlush
+		b.addCommitOnly(msg)
+		return b.full()
 	}
 
-	p.mu.Lock()
-	p.buffer = append(p.buffer, bufferedItem{event: *event, msg: msg})
-	shouldFlush = len(p.buffer) >= 1000
-	p.mu.Unlock()
-
+	b.add(*event, msg)
 	eventsProcessed.Inc()
-	return shouldFlush
+	return b.full()
 }
 
-// Flush writes buffered events to Tinybird and returns the messages
-// whose offsets should be committed. If the Tinybird write fails,
-// the buffer is restored and NO offsets are returned — so the consumer
-// will re-deliver these messages after rebalance.
-func (p *Processor) Flush() ([]*kafka.Message, error) {
-	p.mu.Lock()
-	if len(p.buffer) == 0 {
-		p.mu.Unlock()
-		return nil, nil
+// appendWithRetry appends one sealed batch, retrying with exponential backoff
+// until Tinybird acknowledges it. It returns success only on acknowledgement:
+// dropping an un-acked batch would lose data and committing past it would skip
+// data, so the pipeline stalls (with Kafka buffering) instead. The only error
+// return is on shutdown, when the caller must hold offsets for redelivery.
+func (p *Processor) appendWithRetry(shutdownCtx context.Context, batch *sealedBatch) error {
+	if len(batch.events) == 0 {
+		return nil // DLQ/commit-only batch: nothing to append
 	}
 
-	items := p.buffer
-	p.buffer = make([]bufferedItem, 0, 1000)
-	p.mu.Unlock()
+	batchSizeMetric.Observe(float64(len(batch.events)))
 
-	// Separate real events from DLQ/dup-only messages
-	var events []models.LogEvent
-	msgs := make([]*kafka.Message, 0, len(items))
-	for _, item := range items {
-		msgs = append(msgs, item.msg)
-		if item.event.EventID != "" {
-			events = append(events, item.event)
+	backoff := 200 * time.Millisecond
+	const maxBackoff = 10 * time.Second
+	for attempt := 1; ; attempt++ {
+		// Detached per-attempt context: an in-flight append is allowed to
+		// finish during shutdown instead of being cancelled mid-write.
+		attemptCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		start := time.Now()
+		appendErr := p.tinybird.AppendEvents(attemptCtx, batch.events)
+		appendLatency.Observe(time.Since(start).Seconds())
+		cancel()
+
+		if appendErr == nil {
+			if attempt > 1 {
+				p.logger.Info("batch append recovered",
+					zap.Uint64("seq", batch.seq),
+					zap.Int("attempts", attempt),
+					zap.Int("events", len(batch.events)))
+			}
+			return nil
+		}
+
+		flushFailures.Inc()
+		p.logger.Warn("batch append failed, backing off",
+			zap.Uint64("seq", batch.seq),
+			zap.Int("events", len(batch.events)),
+			zap.Int("attempt", attempt),
+			zap.Duration("backoff", backoff),
+			zap.Error(appendErr))
+
+		select {
+		case <-shutdownCtx.Done():
+			return shutdownCtx.Err()
+		case <-time.After(backoff):
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
+}
 
-	batchSizeMetric.Observe(float64(len(events)))
+// appendWorker drains sealed batches and reports completions. Multiple workers
+// run concurrently; each in-flight append holds one gauge slot.
+func (p *Processor) appendWorker(shutdownCtx context.Context, batches <-chan *sealedBatch, done chan<- completedBatch, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for batch := range batches {
+		batchesPending.Dec()
+		appendInflight.Inc()
+		err := p.appendWithRetry(shutdownCtx, batch)
+		appendInflight.Dec()
 
-	ctx := context.Background()
-
-	// Tinybird acknowledges the batch before its Kafka offsets are committed.
-	if len(events) > 0 {
-		if err := p.tinybird.AppendEvents(ctx, events); err != nil {
-			p.logger.Error("batch insert failed, restoring buffer — offsets NOT committed",
-				zap.Error(err), zap.Int("batch_size", len(events)))
-			flushFailures.Inc()
-
-			// Restore buffer so events aren't lost
-			p.mu.Lock()
-			p.buffer = append(items, p.buffer...)
-			p.mu.Unlock()
-
-			return nil, fmt.Errorf("tinybird append: %w", err)
+		offsets := make([]kafka.TopicPartition, 0, len(batch.msgs))
+		for _, m := range batch.msgs {
+			offsets = append(offsets, m.TopicPartition)
 		}
+		done <- completedBatch{seq: batch.seq, offsets: offsets, err: err}
 	}
-
-	p.logger.Debug("batch flushed to Tinybird",
-		zap.Int("events", len(events)),
-		zap.Int("msgs", len(msgs)))
-
-	// Return the messages — the caller will commit their offsets.
-	return msgs, nil
 }
 
 func (p *Processor) sendToDLQ(raw []byte, originalErr error) {
@@ -229,35 +323,36 @@ func (p *Processor) sendToDLQ(raw []byte, originalErr error) {
 }
 
 func (p *Processor) Close() {
-	// Final flush (best-effort)
-	if msgs, err := p.Flush(); err == nil {
-		_ = msgs
-	}
 	p.producer.Close()
 }
 
-// --- Consumer loop with batch-aware offset management ---
+// partitionKey identifies a topic-partition for offset tracking.
+type partitionKey struct {
+	topic     string
+	partition int32
+}
 
-// commitOffsets commits the highest offset per partition from a set of messages.
-func commitOffsets(consumer *kafkalib.Consumer, msgs []*kafka.Message, logger *zap.Logger) {
-	if len(msgs) == 0 {
+// commitOffsets commits the highest offset per partition from a set of
+// TopicPartitions. Kafka expects the NEXT offset to consume.
+func commitOffsets(consumer *kafkalib.Consumer, tps []kafka.TopicPartition, logger *zap.Logger) {
+	if len(tps) == 0 {
 		return
 	}
 
-	// Find the highest offset per topic-partition
-	highest := make(map[string]kafka.TopicPartition)
-	for _, msg := range msgs {
-		key := fmt.Sprintf("%s-%d", *msg.TopicPartition.Topic, msg.TopicPartition.Partition)
-		existing, ok := highest[key]
-		if !ok || msg.TopicPartition.Offset > existing.Offset {
-			highest[key] = msg.TopicPartition
+	highest := make(map[partitionKey]kafka.TopicPartition)
+	for _, tp := range tps {
+		if tp.Topic == nil {
+			continue
+		}
+		k := partitionKey{topic: *tp.Topic, partition: tp.Partition}
+		if cur, ok := highest[k]; !ok || tp.Offset > cur.Offset {
+			highest[k] = tp
 		}
 	}
 
-	// Commit the highest offset per partition. Kafka expects the NEXT offset.
 	offsets := make([]kafka.TopicPartition, 0, len(highest))
 	for _, tp := range highest {
-		tp.Offset = tp.Offset + 1
+		tp.Offset++
 		offsets = append(offsets, tp)
 	}
 
@@ -268,11 +363,67 @@ func commitOffsets(consumer *kafkalib.Consumer, msgs []*kafka.Message, logger *z
 	}
 }
 
+// runCommitter commits offsets only for the contiguous prefix of acknowledged
+// batches. Batches seal in poll order, so per-partition offsets rise
+// monotonically across batches: committing a seq prefix can never skip an
+// un-acked message, even when appends finish out of order. A failed batch
+// (shutdown only) halts all further commits; uncommitted messages are
+// re-delivered on restart.
+func runCommitter(consumer *kafkalib.Consumer, done <-chan completedBatch, logger *zap.Logger) {
+	pending := make(map[uint64][]kafka.TopicPartition)
+	var next uint64
+	failed := false
+
+	for cb := range done {
+		if cb.err != nil {
+			logger.Error("batch was not durably appended; holding offsets for redelivery",
+				zap.Uint64("seq", cb.seq), zap.Error(cb.err))
+			failed = true
+		}
+		if failed {
+			continue
+		}
+		pending[cb.seq] = cb.offsets
+
+		var prefix []kafka.TopicPartition
+		for {
+			offsets, ok := pending[next]
+			if !ok {
+				break
+			}
+			delete(pending, next)
+			prefix = append(prefix, offsets...)
+			next++
+		}
+		if len(prefix) > 0 {
+			commitOffsets(consumer, prefix, logger)
+		}
+	}
+}
+
 func main() {
 	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
 	cfg := config.Load()
+
+	// Pipeline tuning, all overridable via WORKER_* env vars.
+	batchSize := cfg.Worker.BatchSize
+	if batchSize <= 0 {
+		batchSize = 2000
+	}
+	flushMs := cfg.Worker.FlushIntervalMs
+	if flushMs <= 0 {
+		flushMs = 250
+	}
+	concurrency := cfg.Worker.AppendConcurrency
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+	if concurrency > 32 {
+		concurrency = 32
+	}
+	flushInterval := time.Duration(flushMs) * time.Millisecond
 
 	proc, err := NewProcessor(cfg, logger)
 	if err != nil {
@@ -306,32 +457,57 @@ func main() {
 		cancel()
 	}()
 
+	// Bounded channels are the backpressure valve: seal blocks when the
+	// pipeline is full, pausing polls while Kafka holds the backlog.
+	batches := make(chan *sealedBatch, concurrency*2)
+	done := make(chan completedBatch, concurrency*2)
+
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go proc.appendWorker(ctx, batches, done, &wg)
+	}
+	commitDone := make(chan struct{})
+	go func() {
+		runCommitter(consumer, done, logger)
+		close(commitDone)
+	}()
+
 	logger.Info("processing worker started",
 		zap.String("group", cfg.Kafka.GroupWorkers),
-		zap.String("topic", cfg.Kafka.TopicLogs))
+		zap.String("topic", cfg.Kafka.TopicLogs),
+		zap.Int("batch_size", batchSize),
+		zap.Duration("flush_interval", flushInterval),
+		zap.Int("append_concurrency", concurrency))
 
-	// Custom consumer loop: offsets committed ONLY after Tinybird acknowledges the write.
-	flushTimer := time.NewTimer(2 * time.Second)
-	defer flushTimer.Stop()
+	b := newBatcher(batchSize)
+	var seq uint64
 
+	// seal hands the open batch to the append pipeline. The send blocks when
+	// the pipeline is full, which pauses polling — safe at any time because
+	// append workers drain until batches is closed.
+	seal := func() {
+		if b.empty() {
+			return
+		}
+		sb := b.seal(seq)
+		seq++
+		batchesPending.Inc()
+		batches <- sb
+	}
+
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+running:
 	for {
 		select {
 		case <-ctx.Done():
-			// Shutdown: final flush + commit
-			if msgs, err := proc.Flush(); err == nil {
-				commitOffsets(consumer, msgs, logger)
-			}
-			return
+			break running
 
-		case <-flushTimer.C:
-			// Time-based flush
-			msgs, err := proc.Flush()
-			if err != nil {
-				logger.Error("timed flush failed", zap.Error(err))
-			} else if len(msgs) > 0 {
-				commitOffsets(consumer, msgs, logger)
-			}
-			flushTimer.Reset(2 * time.Second)
+		case <-ticker.C:
+			// Time-based seal: bounds end-to-end latency at low traffic.
+			seal()
 
 		default:
 			msg, err := consumer.Poll(100)
@@ -344,22 +520,19 @@ func main() {
 				continue
 			}
 
-			shouldFlush := proc.addToBuffer(msg)
-
-			if shouldFlush {
-				// Size-based flush
-				msgs, err := proc.Flush()
-				if err != nil {
-					logger.Error("size flush failed, message will be re-delivered", zap.Error(err))
-					// Don't commit — message stays uncommitted and will be
-					// re-delivered after rebalance.
-				} else if len(msgs) > 0 {
-					commitOffsets(consumer, msgs, logger)
-				}
-				flushTimer.Reset(2 * time.Second)
+			if proc.bufferOne(b, msg) {
+				// Size-based seal.
+				seal()
 			}
 		}
 	}
+
+	// Shutdown: seal the tail, drain appends, then commit everything acked.
+	seal()
+	close(batches)
+	wg.Wait()
+	close(done)
+	<-commitDone
 }
 
 // normalizeSeverity maps severity strings to standard levels.
@@ -385,12 +558,7 @@ func normalizeSeverity(sev string) string {
 }
 
 func redactSecrets(msg string) string {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(password|passwd|secret|token|api_key|apikey|authorization)\s*[:=]\s*\S+`),
-		regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`),
-		regexp.MustCompile(`\b(?:\d{4}[- ]?){3}\d{4}\b`),
-	}
-	for _, pattern := range patterns {
+	for _, pattern := range secretPatterns {
 		msg = pattern.ReplaceAllString(msg, "[REDACTED]")
 	}
 	return msg

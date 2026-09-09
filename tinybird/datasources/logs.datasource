@@ -1,0 +1,22 @@
+DESCRIPTION >
+    Hot log events for interactive search. Written by the processing workers
+    via the Tinybird Events API; queried by the query-coordinator for the
+    hot (0-7 day) window. The `attributes` column stores the original
+    unstructured fields as a JSON string so the schema stays stable.
+
+SCHEMA >
+    `event_id` String `json:$.event_id`,
+    `timestamp` DateTime64(3) `json:$.timestamp`,
+    `service` LowCardinality(String) `json:$.service`,
+    `severity` LowCardinality(String) `json:$.severity`,
+    `message` String `json:$.message`,
+    `attributes` String `json:$.attributes`,
+    `trace_id` String `json:$.trace_id`,
+    `source` LowCardinality(String) `json:$.source`,
+    `region` LowCardinality(String) `json:$.region`,
+    `version` LowCardinality(String) `json:$.version`
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "service, severity, timestamp"
+ENGINE_PARTITION_KEY "toYYYYMMDD(timestamp)"
+ENGINE_TTL "timestamp + INTERVAL 30 DAY"
