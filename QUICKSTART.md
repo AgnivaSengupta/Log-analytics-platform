@@ -2,7 +2,7 @@
 
 ## 1. Start the Platform
 
-> **Prerequisite:** provision Tinybird + R2 and fill in `.env` first.
+> **Prerequisite:** copy `.env.example` to `.env`, provision Tinybird + R2, and fill it in first.
 > See [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md).
 
 ```bash

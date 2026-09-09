@@ -59,7 +59,7 @@ the application.
 
 ## 3. Start and verify
 
-After replacing every `REPLACE_WITH_...` value in `.env`, run:
+Copy `.env.example` to `.env`, replace every `REPLACE_WITH_...` value, then run:
 
 ```bash
 docker compose up -d --build

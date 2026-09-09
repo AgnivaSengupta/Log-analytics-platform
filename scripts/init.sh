@@ -17,7 +17,7 @@ echo ""
 
 # 1. Load and validate .env
 if [ ! -f .env ]; then
-    echo "ERROR: .env not found in the repo root."
+    echo "ERROR: .env not found. Copy .env.example to .env and fill it in (see MANAGED_SERVICES_SETUP.md)."
     exit 1
 fi
 

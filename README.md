@@ -31,9 +31,10 @@ Kafka → Detection Service → Alert Service → Webhook/Pager
 - A Cloudflare R2 bucket with an API token (object read + write)
 - 4GB+ RAM recommended
 
-> **First-time setup:** provision the managed services and fill in `.env`
-> by following [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md) before
-> starting the stack.
+> **First-time setup:** copy `.env.example` to `.env`, provision the managed
+> services and fill it in by following
+> [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md) before starting the
+> stack.
 
 ### Start the Platform
 
