@@ -79,8 +79,8 @@ func Load() *Config {
 			Datasource:  getEnv("TINYBIRD_DATASOURCE", "logs"),
 		},
 		S3: S3Config{
-			Endpoint:     getEnv("S3_ENDPOINT", "http://localhost:9000"),
-			Region:       getEnv("S3_REGION", "us-east-1"),
+			Endpoint:     getEnv("S3_ENDPOINT", ""),
+			Region:       getEnv("S3_REGION", "auto"),
 			Bucket:       getEnv("S3_BUCKET", "log-archive"),
 			AccessKey:    getEnv("S3_ACCESS_KEY", ""),
 			SecretKey:    getEnv("S3_SECRET_KEY", ""),

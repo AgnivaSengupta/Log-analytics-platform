@@ -25,7 +25,7 @@ import (
 var (
 	archivedEvents = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "archive_events_total",
-		Help: "Total events archived to S3",
+		Help: "Total events archived to Cloudflare R2",
 	})
 
 	archiveLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -39,9 +39,9 @@ func init() {
 	prometheus.MustRegister(archivedEvents, archiveLatency)
 }
 
-// ArchiveWriter reads raw Kafka messages and writes them verbatim to S3/MinIO.
-// It preserves the original bytes exactly as received to support replay with
-// future parser versions.
+// ArchiveWriter reads raw Kafka messages and writes them verbatim to the
+// Cloudflare R2 archive bucket. It preserves the original bytes exactly as
+// received to support replay with future parser versions.
 type ArchiveWriter struct {
 	cfg    *config.Config
 	s3     *storage.S3Client
@@ -51,7 +51,7 @@ type ArchiveWriter struct {
 }
 
 // bufferedArchiveItem keeps a Kafka offset alongside its raw payload. The
-// offset is committed only after the corresponding S3 batch is durable.
+// offset is committed only after the corresponding R2 batch is durable.
 type bufferedArchiveItem struct {
 	item storage.RawArchiveItem
 	msg  *kafka.Message
@@ -111,7 +111,7 @@ func (a *ArchiveWriter) addToBuffer(msg *kafka.Message) bool {
 	return shouldFlush
 }
 
-// flushService writes buffered raw events for a service to S3 and returns the
+// flushService writes buffered raw events for a service to R2 and returns the
 // offsets that may now be committed. On failure it restores the whole batch.
 func (a *ArchiveWriter) flushService(service string) ([]*kafka.Message, error) {
 	a.mu.Lock()

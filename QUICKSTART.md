@@ -2,11 +2,14 @@
 
 ## 1. Start the Platform
 
+> **Prerequisite:** provision Tinybird + R2 and fill in `.env` first.
+> See [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md).
+
 ```bash
 cd log-analytics-platform
 
-# Start all services
-docker compose up -d
+# Start Kafka and application services
+docker compose up -d --build
 
 # Wait for services to be healthy (~60 seconds)
 docker compose ps
@@ -24,7 +27,8 @@ docker compose ps
 | **Query API** | http://localhost:8081 | - |
 | **Grafana** | http://localhost:3001 | admin / admin |
 | **Prometheus** | http://localhost:9090 | - |
-| **MinIO Console** | http://localhost:9002 | PLACEHOLDER_S3_ACCESS_KEY / PLACEHOLDER_S3_SECRET_KEY |
+| **Tinybird dashboard** | your Tinybird workspace | your Tinybird login |
+| **R2 bucket browser** | Cloudflare dashboard -> R2 | your Cloudflare login |
 
 ## 3. Ingest Sample Logs
 
@@ -141,9 +145,12 @@ docker compose exec kafka kafka-console-consumer \
   --topic logs \
   --from-beginning
 
-# Check ClickHouse
-docker compose exec clickhouse clickhouse-client
-# Then run: SELECT count() FROM log_analytics.logs;
+# Check hot storage (Tinybird) - source .env first so the tokens are set
+source .env
+curl -s -X POST "$TINYBIRD_API_URL/v0/sql" \
+  -H "Authorization: Bearer $TINYBIRD_READ_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"q":"SELECT count() AS total FROM logs FORMAT JSON"}'
 ```
 
 ## 9. Common Issues
@@ -171,13 +178,27 @@ docker compose exec kafka kafka-broker-api-versions --bootstrap-server localhost
 docker compose exec kafka kafka-topics --list --bootstrap-server localhost:9092
 ```
 
-### ClickHouse connection issues
+### Tinybird connection issues
 ```bash
-# Check ClickHouse is healthy
-docker compose exec clickhouse clickhouse-client --query "SELECT 1"
+# Verify the token, regional host, and datasource name from .env
+source .env
+curl -s -X POST "$TINYBIRD_API_URL/v0/sql" \
+  -H "Authorization: Bearer $TINYBIRD_READ_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"q":"SELECT 1 AS ok FORMAT JSON"}'
+# A 401 means a wrong token; a 404/empty result usually means the
+# datasource name does not match TINYBIRD_DATASOURCE.
+```
 
-# View tables
-docker compose exec clickhouse clickhouse-client --query "SHOW TABLES FROM log_analytics"
+### R2 connection issues
+```bash
+# The endpoint must be https://<account-id>.r2.cloudflarestorage.com
+# and S3_REGION must be "auto". An unsigned request should still get
+# an HTTP response (typically 403), proving DNS/TLS work:
+source .env
+curl -s -o /dev/null -w "%{http_code}\n" "$S3_ENDPOINT/"
+# Persistent 403s from the archive writer mean the API token lacks
+# Object Read & Write on S3_BUCKET, or the bucket does not exist.
 ```
 
 ## 10. Stop the Platform
@@ -196,11 +217,11 @@ docker compose down -v
 ## Architecture Quick Reference
 
 ```
-Gateway (8080) → Kafka → Worker → ClickHouse
-                       → Archive Writer → S3/MinIO
+Gateway (8080) → Kafka → Worker → Tinybird (managed hot)
+                       → Archive Writer → Cloudflare R2 (managed cold)
                        → Detection → Alert Service
                        
-Query Coordinator (8081) → ClickHouse (hot) + S3 (cold)
+Query Coordinator (8081) → Tinybird (hot) + R2 (cold)
 ```
 
 ## Key Files

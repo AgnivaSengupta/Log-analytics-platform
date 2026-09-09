@@ -42,45 +42,9 @@ services:
       timeout: 10s
       retries: 5
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:23.12
-    profiles: ["legacy-local"]
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    environment:
-      CLICKHOUSE_DB: log_analytics
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: PLACEHOLDER_CLICKHOUSE_PASSWORD
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  minio:
-    image: minio/minio:latest
-    profiles: ["legacy-local"]
-    ports:
-      - "9001:9000"
-      - "9002:9001"
-    environment:
-      MINIO_ROOT_USER: PLACEHOLDER_S3_ACCESS_KEY
-      MINIO_ROOT_PASSWORD: PLACEHOLDER_S3_SECRET_KEY
-    volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # Hot storage is Tinybird (managed) and the cold archive is Cloudflare R2
+  # (managed). No local database or object-store containers are used.
+  # See MANAGED_SERVICES_SETUP.md before starting the stack.
 
   # Application Services
   gateway:
@@ -236,7 +200,5 @@ services:
       - benchmark
 
 volumes:
-  clickhouse_data:
-  minio_data:
   prometheus_data:
   grafana_data:

@@ -1,9 +1,10 @@
 # Managed services setup
 
-This deployment keeps Kafka, the gateway, detection, alerting, and the user
-interface in Docker. Tinybird is the hot analytics store and Cloudflare R2 is
-the raw, long-retention archive. No local ClickHouse or MinIO instance is used
-by the application.
+This deployment keeps Kafka, the gateway, workers, detection, alerting, and
+the user interface in Docker. Tinybird is the hot analytics store and
+Cloudflare R2 is the raw, long-retention archive. No local database or
+object-store containers are used: every `S3_*` setting in `.env` points at R2
+over its S3-compatible API.
 
 ## 1. Create the Tinybird datasource
 
@@ -24,31 +25,65 @@ unstructured application fields are retained without changing the schema.
 | region | LowCardinality(String) |
 | version | LowCardinality(String) |
 
-Create two static Tinybird tokens: one with `DATASOURCE:APPEND` permission for
-this datasource and one with read permission. Put them in
-`TINYBIRD_APPEND_TOKEN` and `TINYBIRD_READ_TOKEN` in `.env`. Set
-`TINYBIRD_API_URL` to the API host for your Tinybird region.
+Two ways to create it:
+
+- **Tinybird CLI (recommended, reproducible):** authenticate with `tb auth`,
+  then from the repo root run
+  `tb push tinybird/datasources/logs.datasource --force`. The checked-in
+  `.datasource` file defines the schema above plus a sorting key, daily
+  partitions, and a 30-day TTL.
+- **Dashboard:** create an empty datasource and add the columns manually.
+
+Then create two tokens in the Tinybird dashboard:
+
+- an append token with `DATASOURCE:APPEND` on the `logs` datasource, stored
+  as `TINYBIRD_APPEND_TOKEN` (used by the processing workers);
+- a read token with read access to the datasource, stored as
+  `TINYBIRD_READ_TOKEN` (used by the query coordinator).
+
+Set `TINYBIRD_API_URL` to the API host for your Tinybird region (for example
+`https://api.tinybird.co` for the default region).
 
 ## 2. Create the R2 archive bucket
 
-Create the bucket named by `S3_BUCKET` and an R2 API token with object read and
-write permission scoped to that bucket. Copy its access-key ID, secret, and
-account-specific S3 endpoint into `.env`. Keep `S3_REGION=auto` and
-`S3_ENSURE_BUCKET=false`; R2 bucket creation belongs in Cloudflare, not in the
-application.
+In the Cloudflare dashboard, create the bucket named by `S3_BUCKET` and an
+R2 API token scoped to that bucket with **Object Read & Write** permission.
+Copy the account ID, access-key ID, and secret into `.env`:
+
+- `S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`
+- `S3_REGION=auto` (always `auto` for R2)
+- `S3_ACCESS_KEY` / `S3_SECRET_KEY` from the API token
+
+Keep `S3_ENSURE_BUCKET=false`: R2 buckets are created in Cloudflare, not by
+the application.
 
 ## 3. Start and verify
 
 After replacing every `REPLACE_WITH_...` value in `.env`, run:
 
-```powershell
-docker compose up --build
+```bash
+docker compose up -d --build
+./scripts/init.sh
 ```
 
-Submit a log to `http://localhost:8080/v1/logs`, then verify it in Tinybird and
-in the R2 `raw/YYYY/MM/DD/...` object prefix. The worker only commits a Kafka
-offset after Tinybird acknowledges the append; the archive writer independently
-commits only after R2 confirms the object write.
+Ingest a smoke-test event:
 
-The `legacy-local` Compose profile retains the old infrastructure containers
-only for reference. It is not used by the managed application path.
+```bash
+curl -X POST http://localhost:8080/v1/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"events": [{"event_id": "smoke-001", "timestamp": "2026-09-09T00:00:00.000Z", "service": "smoke", "severity": "INFO", "message": "managed storage smoke test"}]}'
+```
+
+Then verify it in both managed stores:
+
+- **Tinybird:** query
+  `SELECT * FROM logs WHERE service = 'smoke' ORDER BY timestamp DESC LIMIT 10`
+  in the Tinybird dashboard, or search for it in the UI at
+  http://localhost:3000.
+- **R2:** browse the bucket in the Cloudflare dashboard for a new object
+  under `raw/<YYYY>/<MM>/<DD>/<HH>/smoke/`.
+
+The worker only commits a Kafka offset after Tinybird acknowledges the
+append; the archive writer independently commits only after R2 confirms the
+object write. If a managed service is unreachable, its consumer group
+backlogs in Kafka and drains automatically on recovery.
