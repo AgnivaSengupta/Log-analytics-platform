@@ -155,7 +155,7 @@ All configuration is via environment variables (see `.env`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KAFKA_BROKERS` | `kafka:9092` | Kafka bootstrap servers |
+| `KAFKA_BROKERS` | `kafka:29092` | Kafka bootstrap servers (internal listener) |
 | `KAFKA_TOPIC_LOGS` | `logs` | Main log topic |
 | `TINYBIRD_API_URL` | `https://api.tinybird.co` | Tinybird API host for your region |
 | `TINYBIRD_DATASOURCE` | `logs` | Tinybird datasource name |
