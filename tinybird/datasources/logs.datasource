@@ -20,3 +20,8 @@ ENGINE "MergeTree"
 ENGINE_SORTING_KEY "service, severity, timestamp"
 ENGINE_PARTITION_KEY "toYYYYMMDD(timestamp)"
 ENGINE_TTL "timestamp + INTERVAL 30 DAY"
+
+
+
+TOKEN logs_append APPEND
+TOKEN logs_read READ
