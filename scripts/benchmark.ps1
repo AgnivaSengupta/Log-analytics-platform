@@ -34,8 +34,19 @@ function Invoke-LoadTest {
     param([string]$LogName, [string]$ReportName, [string[]]$LoadArgs)
     Write-Host "--- $LogName ---"
     $logPath = Join-Path $ResultsDir $LogName
-    docker compose --profile benchmark run --rm -v "${ResultsMount}:/reports" load-generator /bin/service @LoadArgs -report "/reports/$ReportName" 2>&1 | Tee-Object -FilePath $logPath
-    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: load test exited with code $LASTEXITCODE" }
+    # NOTE: stderr goes to a temp file, NOT 2>&1. With
+    # $ErrorActionPreference='Stop', merged native stderr would abort the
+    # script on harmless docker status lines.
+    $errTmp = [IO.Path]::GetTempFileName()
+    docker compose --profile benchmark --progress quiet run --rm -v "${ResultsMount}:/reports" load-generator /bin/service @LoadArgs -report "/reports/$ReportName" 2> $errTmp | Tee-Object -FilePath $logPath
+    $code = $LASTEXITCODE
+    if ((Get-Item $errTmp).Length -gt 0) {
+        Add-Content -Path $logPath -Value ''
+        Add-Content -Path $logPath -Value '--- stderr ---'
+        Get-Content $errTmp | Add-Content -Path $logPath
+    }
+    Remove-Item $errTmp -Force
+    if ($code -ne 0) { Write-Host "WARNING: load test exited with code $code" }
     Write-Host ''
 }
 
