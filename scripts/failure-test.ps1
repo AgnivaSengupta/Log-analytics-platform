@@ -5,6 +5,7 @@
 
 $ErrorActionPreference = 'Stop'
 $GatewayUrl = if ($env:GATEWAY_URL) { $env:GATEWAY_URL } else { 'http://localhost:8080' }
+$LoadGatewayUrl = if ($env:LOAD_GATEWAY_URL) { $env:LOAD_GATEWAY_URL } else { 'http://gateway:8080' }
 
 Write-Host '==========================================='
 Write-Host '  Failure Recovery Test'
@@ -12,7 +13,7 @@ Write-Host '==========================================='
 Write-Host ''
 
 Write-Host 'Starting sustained load (25K events/sec, 180s)...'
-docker compose --profile benchmark run -d --rm load-generator /bin/service -gateway $GatewayUrl -rate 25000 -duration 180s -workers 10 -batch 100 -error-rate 0.002 | Out-Null
+docker compose --profile benchmark run -d --rm load-generator /bin/service -gateway $LoadGatewayUrl -rate 25000 -duration 180s -workers 10 -batch 100 -error-rate 0.002 | Out-Null
 Write-Host 'Waiting 30 seconds for steady state...'
 Start-Sleep -Seconds 30
 

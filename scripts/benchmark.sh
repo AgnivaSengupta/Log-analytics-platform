@@ -5,6 +5,9 @@
 set -e
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
+# The load-generator runs inside the compose network, where the gateway
+# is reachable as http://gateway:8080 (localhost would be itself).
+LOAD_GATEWAY_URL="${LOAD_GATEWAY_URL:-http://gateway:8080}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${SCRIPT_DIR}/../benchmark-results"
 
@@ -15,6 +18,7 @@ echo "║   Distributed Log Analytics - Benchmark Suite    ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo ""
 echo "Gateway: $GATEWAY_URL"
+echo "Load target: $LOAD_GATEWAY_URL"
 echo "Results: $RESULTS_DIR"
 echo ""
 
@@ -42,7 +46,7 @@ echo "════════════════════════�
 echo ""
 
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
-    -gateway "$GATEWAY_URL" \
+    -gateway "$LOAD_GATEWAY_URL" \
     -step \
     -workers 20 \
     -batch 200 \
@@ -61,7 +65,7 @@ echo "════════════════════════�
 echo ""
 
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
-    -gateway "$GATEWAY_URL" \
+    -gateway "$LOAD_GATEWAY_URL" \
     -rate 50000 \
     -duration 300s \
     -workers 20 \
@@ -84,7 +88,7 @@ echo ""
 # Phase 1: Normal error rate
 echo "Phase 1: Normal traffic (0.2% errors, 60s)..."
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
-    -gateway "$GATEWAY_URL" \
+    -gateway "$LOAD_GATEWAY_URL" \
     -rate 25000 \
     -duration 60s \
     -workers 10 \
@@ -98,7 +102,7 @@ echo ""
 # Phase 2: Spike errors
 echo "Phase 2: Error spike (8% errors, 120s)..."
 docker compose run --rm -v "$RESULTS_DIR:/reports" load-generator /bin/service \
-    -gateway "$GATEWAY_URL" \
+    -gateway "$LOAD_GATEWAY_URL" \
     -rate 25000 \
     -duration 120s \
     -workers 10 \

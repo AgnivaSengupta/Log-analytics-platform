@@ -5,7 +5,9 @@
 # Run:  powershell -ExecutionPolicy Bypass -File .\scripts\benchmark.ps1
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $GatewayUrl = if ($env:GATEWAY_URL) { $env:GATEWAY_URL } else { 'http://localhost:8080' }
+$LoadGatewayUrl = if ($env:LOAD_GATEWAY_URL) { $env:LOAD_GATEWAY_URL } else { 'http://gateway:8080' }
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ResultsDir = Join-Path (Join-Path $ScriptDir '..') 'benchmark-results'
 New-Item -ItemType Directory -Force -Path $ResultsDir | Out-Null
@@ -18,6 +20,7 @@ Write-Host '==========================================='
 Write-Host ''
 Write-Host "Gateway: $GatewayUrl"
 Write-Host "Results: $ResultsDir"
+Write-Host "Load target: $LoadGatewayUrl"
 Write-Host ''
 
 try {
@@ -50,20 +53,20 @@ function Invoke-LoadTest {
 Write-Host '==========================================='
 Write-Host '  TEST 1: THROUGHPUT STEPPING (10K -> 100K)'
 Write-Host '==========================================='
-Invoke-LoadTest -LogName 'throughput-test.log' -ReportName 'throughput-report.json' -LoadArgs @('-gateway', $GatewayUrl, '-step', '-workers', '20', '-batch', '200', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'throughput-test.log' -ReportName 'throughput-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-step', '-workers', '20', '-batch', '200', '-error-rate', '0.002')
 
 Write-Host '==========================================='
 Write-Host '  TEST 2: SUSTAINED LOAD (50K/sec, 5min)'
 Write-Host '==========================================='
-Invoke-LoadTest -LogName 'sustained-test.log' -ReportName 'sustained-report.json' -LoadArgs @('-gateway', $GatewayUrl, '-rate', '50000', '-duration', '300s', '-workers', '20', '-batch', '200', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'sustained-test.log' -ReportName 'sustained-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '50000', '-duration', '300s', '-workers', '20', '-batch', '200', '-error-rate', '0.002')
 
 Write-Host '==========================================='
 Write-Host '  TEST 3: ERROR RATE SPIKE (DETECTION)'
 Write-Host '==========================================='
 Write-Host 'Phase 1: Normal traffic (0.2% errors, 60s)...'
-Invoke-LoadTest -LogName 'detection-phase1.log' -ReportName 'detection-phase1-report.json' -LoadArgs @('-gateway', $GatewayUrl, '-rate', '25000', '-duration', '60s', '-workers', '10', '-batch', '100', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'detection-phase1.log' -ReportName 'detection-phase1-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', '60s', '-workers', '10', '-batch', '100', '-error-rate', '0.002')
 Write-Host 'Phase 2: Error spike (8% errors, 120s)...'
-Invoke-LoadTest -LogName 'detection-phase2.log' -ReportName 'detection-phase2-report.json' -LoadArgs @('-gateway', $GatewayUrl, '-rate', '25000', '-duration', '120s', '-workers', '10', '-batch', '100', '-error-rate', '0.08')
+Invoke-LoadTest -LogName 'detection-phase2.log' -ReportName 'detection-phase2-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', '120s', '-workers', '10', '-batch', '100', '-error-rate', '0.08')
 
 Write-Host '==========================================='
 Write-Host '  BENCHMARK COMPLETE'
