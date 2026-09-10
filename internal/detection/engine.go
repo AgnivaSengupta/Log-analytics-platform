@@ -16,6 +16,7 @@ type WindowState struct {
 	ErrorEvents int64
 	StartTime   time.Time
 	Service     string
+	LastAlertAt time.Time
 }
 
 // Engine is the real-time detection engine.
@@ -93,10 +94,8 @@ func (e *Engine) checkAlerts(window *WindowState, event models.LogEvent) {
 	if window.TotalEvents < int64(e.minEvents) {
 		return
 	}
-
 	errorRate := float64(window.ErrorEvents) / float64(window.TotalEvents)
-
-	if errorRate >= e.alertThreshold {
+	if errorRate >= e.alertThreshold && time.Since(window.LastAlertAt) > 15*time.Minute {
 		alert := models.Alert{
 			ID:          fmt.Sprintf("alert-%s-%d", window.Service, time.Now().UnixNano()),
 			RuleID:      "error-rate-threshold",
@@ -104,12 +103,11 @@ func (e *Engine) checkAlerts(window *WindowState, event models.LogEvent) {
 			Fingerprint: fmt.Sprintf("error_rate_%s", window.Service),
 			Severity:    "WARNING",
 			Value:       errorRate,
-			Message:     fmt.Sprintf("Error rate %.2f%% exceeds threshold %.2f%% for service %s",
-				errorRate*100, e.alertThreshold*100, window.Service),
+			Message:     fmt.Sprintf("Error rate %.2f%% exceeds threshold %.2f%% for service %s", errorRate*100, e.alertThreshold*100, window.Service),
 			TriggeredAt: time.Now(),
 			Status:      "firing",
 		}
-
+		window.LastAlertAt = time.Now()
 		e.fireAlert(alert)
 	}
 }
@@ -155,7 +153,7 @@ func (e *Engine) trackFingerprint(event models.LogEvent) {
 // fireAlert sends the alert to all registered callbacks.
 func (e *Engine) fireAlert(alert models.Alert) {
 	for _, cb := range e.alertCallbacks {
-		go cb(alert)
+		cb(alert)
 	}
 }
 

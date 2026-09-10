@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -17,6 +18,31 @@ type LogEvent struct {
 	Source     string                 `json:"source,omitempty"`
 	Region     string                 `json:"region,omitempty"`
 	Version    string                 `json:"version,omitempty"`
+}
+
+
+// NormalizeSeverity maps producer-specific severity strings onto the
+// platform's canonical levels. Unknown non-empty values are kept as-is
+// (uppercased); empty input becomes INFO.
+func NormalizeSeverity(sev string) string {
+	upper := strings.ToUpper(strings.TrimSpace(sev))
+	switch upper {
+	case "FATAL", "CRITICAL", "EMERGENCY", "EMERG":
+		return "FATAL"
+	case "ERROR", "ERR":
+		return "ERROR"
+	case "WARNING", "WARN":
+		return "WARNING"
+	case "INFO", "INFORMATION":
+		return "INFO"
+	case "DEBUG", "TRACE":
+		return "DEBUG"
+	default:
+		if upper == "" {
+			return "INFO"
+		}
+		return upper
+	}
 }
 
 // RawEvent represents the original event before normalization.

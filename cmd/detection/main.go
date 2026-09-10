@@ -90,6 +90,7 @@ func (ds *DetectionService) Process(msg *kafka.Message) error {
 		return nil
 	}
 
+	event.Severity = models.NormalizeSeverity(event.Severity)
 	ds.engine.ProcessEvent(event)
 	detectionEvents.Inc()
 
@@ -112,7 +113,7 @@ func (ds *DetectionService) handleAlert(alert models.Alert) {
 		return
 	}
 
-	if err := ds.producer.Produce("alerts", alert.Fingerprint, data); err != nil {
+	if err := ds.producer.ProduceSync("alerts", alert.Fingerprint, data); err != nil {
 		ds.logger.Error("alert produce failed", zap.Error(err))
 	}
 }
@@ -175,7 +176,7 @@ func main() {
 		zap.Int("window_minutes", cfg.Detection.WindowMinutes),
 		zap.Float64("error_rate_threshold", cfg.Detection.ErrorRateThreshold))
 
-	if err := consumer.PollLoop(ctx, ds.Process); err != nil && err != context.Canceled {
+	if err := consumer.PollLoopBatch(ctx, ds.Process, 500, 200*time.Millisecond); err != nil && err != context.Canceled {
 		logger.Fatal("consumer loop failed", zap.Error(err))
 	}
 }

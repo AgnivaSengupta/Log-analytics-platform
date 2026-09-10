@@ -23,6 +23,11 @@ import (
 	"github.com/log-analytics-platform/internal/models"
 )
 
+const (
+	maxBodyBytes        = 8 << 20 // 8 MiB
+	maxEventsPerRequest = 5000
+)
+
 var (
 	eventsIngested = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_events_ingested_total",
@@ -68,26 +73,59 @@ func NewGateway(cfg *config.Config, logger *zap.Logger) (*Gateway, error) {
 	}, nil
 }
 
+func (g *Gateway) tryReserve(n int64) bool {
+	if n <= 0 {
+		return true
+	}
+	for {
+		cur := currentRate.Load()
+		if cur+n > g.quota {
+			return false
+		}
+		if currentRate.CompareAndSwap(cur, cur+n) {
+			return true
+		}
+	}
+}
+
 func (g *Gateway) handleIngest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
 		ingestLatency.Observe(time.Since(start).Seconds())
 	}()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req models.IngestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 		return
 	}
-
-	// Rate limiting
-	rate := currentRate.Load()
-	if rate > g.quota {
-		eventsRejected.Add(float64(len(req.Events)))
+	
+	n := int64(len(req.Events))
+	if n == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(models.IngestResponse{
+			Accepted: 0,
+			Failed:   0,
+		})
+		return
+	}
+	
+	if n > maxEventsPerRequest {
+		http.Error(
+			w,
+			`{"error":"batch too large"}`,
+			http.StatusRequestEntityTooLarge,
+		)
+		return
+	}
+	
+	if !g.tryReserve(n) {
+		eventsRejected.Add(float64(n))
 		w.Header().Set("Retry-After", "1")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"error":       "quota exceeded",
 			"retry_after": 1,
 		})
@@ -164,7 +202,6 @@ func (g *Gateway) handleIngest(w http.ResponseWriter, r *http.Request) {
 			eventsIngested.WithLabelValues(services[i], "kafka_failed").Inc()
 		}
 
-		currentRate.Add(int64(accepted))
 	}
 
 	totalFailed := validationFailures + kafkaFailures

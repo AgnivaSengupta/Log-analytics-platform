@@ -21,13 +21,15 @@ type Producer struct {
 // NewProducer creates a new Kafka producer.
 func NewProducer(cfg config.KafkaConfig, logger *zap.Logger) (*Producer, error) {
 	p, err := kafka.NewProducer(&kafka.ConfigMap{
-		"bootstrap.servers":  cfg.Brokers,
-		"acks":               "all",
-		"retries":            3,
-		"retry.backoff.ms":   100,
-		"linger.ms":          5,
-		"batch.num.messages": 1000,
-		"compression.type":   "snappy",
+		"bootstrap.servers":            cfg.Brokers,
+		"acks":                         "all",
+		"enable.idempotence":           true,
+		"retries":                      8,
+		"retry.backoff.ms":             100,
+		"linger.ms":                    20,
+		"batch.num.messages":           10000,
+		"queue.buffering.max.kbytes":   1048576,
+		"compression.type":             "lz4",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kafka producer: %w", err)
@@ -227,6 +229,67 @@ func NewConsumer(cfg config.KafkaConfig, groupID string, topics []string, logger
 	}
 
 	return &Consumer{consumer: c, logger: logger}, nil
+}
+
+
+func (c *Consumer) PollLoopBatch(ctx context.Context, handler func(*kafka.Message) error, maxEvents int, maxWait time.Duration) error {
+	type pkey struct {
+		topic     string
+		partition int32
+	}
+	pending := make(map[pkey]kafka.TopicPartition)
+	n := 0
+	lastCommit := time.Now()
+
+	commit := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		offsets := make([]kafka.TopicPartition, 0, len(pending))
+		for _, tp := range pending {
+			tp.Offset++
+			offsets = append(offsets, tp)
+		}
+		if _, err := c.consumer.CommitOffsets(offsets); err != nil {
+			return err
+		}
+		pending = make(map[pkey]kafka.TopicPartition)
+		n = 0
+		lastCommit = time.Now()
+		return nil
+	}
+
+	for {
+		if ctx.Err() != nil {
+			_ = commit()
+			return ctx.Err()
+		}
+		msg, err := c.Poll(100)
+		if err != nil {
+			c.logger.Error("poll error", zap.Error(err))
+			time.Sleep(time.Second)
+			continue
+		}
+		if msg == nil {
+			if n > 0 && time.Since(lastCommit) >= maxWait {
+				if err := commit(); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := handler(msg); err != nil {
+			return fmt.Errorf("handler failed at %s[%d] offset %d: %w",
+				*msg.TopicPartition.Topic, msg.TopicPartition.Partition, msg.TopicPartition.Offset, err)
+		}
+		pending[pkey{*msg.TopicPartition.Topic, msg.TopicPartition.Partition}] = msg.TopicPartition
+		n++
+		if n >= maxEvents || time.Since(lastCommit) >= maxWait {
+			if err := commit(); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // Poll reads a single message with the given timeout.
