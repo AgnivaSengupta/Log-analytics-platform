@@ -62,7 +62,7 @@ on a workload where those fundamentals are unavoidable:
 | Fundamental | Where it is exercised |
 |---|---|
 | Partitioning | Kafka key `service:source`, per-partition consumer groups, date/hour object prefixes |
-| Replay | 7-day Kafka retention + verbatim raw archive → reprocess with a new parser |
+| Replay | 24-hour Kafka retention + verbatim raw archive → reprocess with a new parser |
 | Horizontal scaling | Stateless gateways, two independently scalable consumer groups |
 | Backpressure | HTTP 429 quota, Kafka buffering, commit-after-durable-write |
 | Failure recovery | Consumer-group rebalance, buffer restoration, DLQ diversion, at-least-once semantics |
@@ -169,7 +169,7 @@ this repository's CI (see [§12.4](#124-measurement-method)).
 |---|---|---|---|
 | N1 | Scalability | Gateways and both consumer groups scale horizontally; scaling unit is the Kafka partition count | 12 partitions caps hot-path consumers at 12 |
 | N2 | Availability | Stateless HTTP tier + `restart: unless-stopped` + consumer-group failover | Kafka is a single broker (RF=1) in the reference deployment |
-| N3 | Durability | `acks=all`, commit-after-ack, 7-day Kafka retention, R2 archive | Kafka-side durability = broker-local disks in compose |
+| N3 | Durability | `acks=all`, commit-after-ack, 24-hour Kafka retention, R2 archive | Kafka-side durability = broker-local disks in compose |
 | N4 | Latency | 5 ms producer linger, gzip'd 5 000-row appends, read-through queries | Worker flush adds up to 2 s tail latency by design |
 | N5 | Fault tolerance | Buffer restore on failure, DLQ for poison events, independent consumer groups | Poison event that fails *repeatedly* re-enters the buffer only as DLQ'd; store faults stall the group |
 | N6 | Security | Scoped Tinybird append vs read tokens; R2 token scoped to one bucket; `.env` gitignored | No ingest authentication, no TLS, no query RBAC ([§13](#13-security--compliance-design)) |

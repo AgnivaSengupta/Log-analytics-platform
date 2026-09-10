@@ -92,7 +92,7 @@ func (qc *QueryCoordinator) hotWhere(req models.QueryRequest) string {
 
 func (qc *QueryCoordinator) hotQuery(ctx context.Context, req models.QueryRequest) ([]models.LogEvent, int64, error) {
 	where := qc.hotWhere(req)
-	countRows, err := qc.tinybird.Query(ctx, "SELECT count() AS total FROM "+qc.tinybird.Datasource()+where)
+	countRows, err := qc.tinybird.Query(ctx, "SELECT count() AS total FROM "+qc.tinybird.Datasource+where)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -100,7 +100,7 @@ func (qc *QueryCoordinator) hotQuery(ctx context.Context, req models.QueryReques
 	if len(countRows) > 0 {
 		_ = json.Unmarshal(countRows[0]["total"], &total)
 	}
-	query := fmt.Sprintf("SELECT event_id, timestamp, service, severity, message, attributes, trace_id, source, region, version FROM %s%s ORDER BY timestamp DESC LIMIT %d OFFSET %d", qc.tinybird.Datasource(), where, req.Limit, req.Offset)
+	query := fmt.Sprintf("SELECT event_id, timestamp, service, severity, message, attributes, trace_id, source, region, version FROM %s%s ORDER BY timestamp DESC LIMIT %d OFFSET %d", qc.tinybird.Datasource, where, req.Limit, req.Offset)
 	rows, err := qc.tinybird.Query(ctx, query)
 	if err != nil {
 		return nil, 0, err
@@ -143,7 +143,7 @@ func (qc *QueryCoordinator) hotQuery(ctx context.Context, req models.QueryReques
 
 func (qc *QueryCoordinator) hotTimeline(ctx context.Context, service string, start, end time.Time, seconds int) ([]map[string]interface{}, error) {
 	req := models.QueryRequest{Service: service, StartTime: start, EndTime: end}
-	query := fmt.Sprintf("SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket, count() AS count, countIf(severity = 'ERROR') AS error_count FROM %s%s GROUP BY bucket ORDER BY bucket", seconds, qc.tinybird.Datasource(), qc.hotWhere(req))
+	query := fmt.Sprintf("SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket, count() AS count, countIf(severity = 'ERROR') AS error_count FROM %s%s GROUP BY bucket ORDER BY bucket", seconds, qc.tinybird.Datasource, qc.hotWhere(req))
 	rows, err := qc.tinybird.Query(ctx, query)
 	if err != nil {
 		return nil, err
@@ -162,7 +162,7 @@ func (qc *QueryCoordinator) hotTimeline(ctx context.Context, service string, sta
 }
 
 func (qc *QueryCoordinator) hotAggregateCount(ctx context.Context, start, end time.Time) (map[string]map[string]int64, error) {
-	rows, err := qc.tinybird.Query(ctx, "SELECT service, severity, count() AS count FROM "+qc.tinybird.Datasource()+qc.hotWhere(models.QueryRequest{StartTime: start, EndTime: end})+" GROUP BY service, severity")
+	rows, err := qc.tinybird.Query(ctx, "SELECT service, severity, count() AS count FROM "+qc.tinybird.Datasource+qc.hotWhere(models.QueryRequest{StartTime: start, EndTime: end})+" GROUP BY service, severity")
 	if err != nil {
 		return nil, err
 	}

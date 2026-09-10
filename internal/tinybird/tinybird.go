@@ -21,12 +21,12 @@ import (
 )
 
 type Client struct {
-	baseURL      string
-	appendToken  string
-	readToken    string
-	datasource   string
-	http         *http.Client
-	logger       *zap.Logger
+	baseURL     string
+	appendToken string
+	readToken   string
+	Datasource  string
+	http        *http.Client
+	logger      *zap.Logger
 }
 
 type StatusError struct {
@@ -82,7 +82,7 @@ func NewClient(cfg config.TinybirdConfig, logger *zap.Logger) (*Client, error) {
 		baseURL:     strings.TrimRight(cfg.APIURL, "/"),
 		appendToken: cfg.AppendToken,
 		readToken:   cfg.ReadToken,
-		datasource:  cfg.Datasource,
+		Datasource:  cfg.Datasource,
 		http:        &http.Client{Timeout: 35 * time.Second, Transport: transport},
 		logger:      logger,
 	}, nil
@@ -158,7 +158,7 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 	}
 	gzPool.Put(gz)
 
-	u := c.baseURL + "/v0/events?name=" + url.QueryEscape(c.datasource) + "&wait=true"
+	u := c.baseURL + "/v0/events?name=" + url.QueryEscape(c.Datasource) + "&wait=true"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed.Bytes()))
 	if err != nil {
 		return err
@@ -203,4 +203,73 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 		}
 	}
 	return nil
+}
+
+// sqlAPIResponse is Tinybird's /v0/sql FORMAT JSON payload.
+type sqlAPIResponse struct {
+	Data    []map[string]json.RawMessage `json:"data"`
+	Error   string                       `json:"error"`
+	Message string                       `json:"message"`
+}
+
+// Query runs a SQL statement against Tinybird using the read token.
+// Returns one map per row; values are raw JSON so callers can unmarshal
+// into strings, numbers, or nested objects (as query-coordinator does).
+func (c *Client) Query(ctx context.Context, sql string) ([]map[string]json.RawMessage, error) {
+	if c.readToken == "" {
+		return nil, fmt.Errorf("TINYBIRD_READ_TOKEN must be configured")
+	}
+	if strings.TrimSpace(sql) == "" {
+		return nil, fmt.Errorf("empty SQL")
+	}
+
+	q := strings.TrimSpace(sql)
+	if !strings.Contains(strings.ToUpper(q), " FORMAT ") {
+		q += " FORMAT JSON"
+	}
+
+	form := url.Values{}
+	form.Set("q", q)
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/v0/sql",
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.readToken)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64 MiB cap
+	if err != nil {
+		return nil, fmt.Errorf("sql api: read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("sql api returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var parsed sqlAPIResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("sql api: decode: %w", err)
+	}
+	if parsed.Error != "" {
+		return nil, fmt.Errorf("sql api error: %s", parsed.Error)
+	}
+	if parsed.Message != "" && parsed.Data == nil {
+		return nil, fmt.Errorf("sql api error: %s", parsed.Message)
+	}
+	if parsed.Data == nil {
+		return []map[string]json.RawMessage{}, nil
+	}
+	return parsed.Data, nil
 }
