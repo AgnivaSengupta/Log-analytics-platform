@@ -1,4 +1,4 @@
-package tinybird
+package clickhouse
 
 import (
 	"bytes"
@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/log-analytics-platform/internal/config"
 	"github.com/log-analytics-platform/internal/models"
@@ -21,12 +23,13 @@ import (
 )
 
 type Client struct {
-	baseURL     string
-	appendToken string
-	readToken   string
-	Datasource  string
-	http        *http.Client
-	logger      *zap.Logger
+	baseURL  string
+	user     string
+	password string
+	Database string
+	Table    string
+	http     *http.Client
+	logger   *zap.Logger
 }
 
 type StatusError struct {
@@ -37,7 +40,7 @@ type StatusError struct {
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("events api returned %d: %s", e.Status, e.Body)
+	return fmt.Sprintf("clickhouse http returned %d: %s", e.Status, e.Body)
 }
 
 func IsRetryable(err error) bool {
@@ -69,9 +72,15 @@ var (
 	}}
 )
 
-func NewClient(cfg config.TinybirdConfig, logger *zap.Logger) (*Client, error) {
-	if cfg.Datasource == "" {
-		return nil, fmt.Errorf("TINYBIRD_DATASOURCE must be configured")
+func NewClient(cfg config.ClickHouseConfig, logger *zap.Logger) (*Client, error) {
+	if cfg.URL == "" {
+		return nil, fmt.Errorf("CLICKHOUSE_URL must be configured")
+	}
+	if err := validateIdent("CLICKHOUSE_DATABASE", cfg.Database); err != nil {
+		return nil, err
+	}
+	if err := validateIdent("CLICKHOUSE_TABLE", cfg.Table); err != nil {
+		return nil, err
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 128
@@ -79,16 +88,37 @@ func NewClient(cfg config.TinybirdConfig, logger *zap.Logger) (*Client, error) {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.ResponseHeaderTimeout = 35 * time.Second
 	return &Client{
-		baseURL:     strings.TrimRight(cfg.APIURL, "/"),
-		appendToken: cfg.AppendToken,
-		readToken:   cfg.ReadToken,
-		Datasource:  cfg.Datasource,
-		http:        &http.Client{Timeout: 35 * time.Second, Transport: transport},
-		logger:      logger,
+		baseURL:  strings.TrimRight(cfg.URL, "/"),
+		user:     cfg.User,
+		password: cfg.Password,
+		Database: cfg.Database,
+		Table:    cfg.Table,
+		http:     &http.Client{Timeout: 35 * time.Second, Transport: transport},
+		logger:   logger,
 	}, nil
 }
 
-type tinybirdRow struct {
+func validateIdent(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s must be configured", name)
+	}
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			continue
+		}
+		return fmt.Errorf("%s contains invalid characters", name)
+	}
+	return nil
+}
+
+func (c *Client) TableRef() string {
+	if c.Database == "" || c.Database == "default" {
+		return c.Table
+	}
+	return c.Database + "." + c.Table
+}
+
+type logRow struct {
 	EventID    string    `json:"event_id"`
 	Timestamp  time.Time `json:"timestamp"`
 	Service    string    `json:"service"`
@@ -105,8 +135,8 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 	if len(events) == 0 {
 		return nil
 	}
-	if c.appendToken == "" {
-		return fmt.Errorf("TINYBIRD_APPEND_TOKEN must be configured")
+	if c.password == "" {
+		return fmt.Errorf("CLICKHOUSE_PASSWORD must be configured")
 	}
 
 	ndjson := bufPool.Get().(*bytes.Buffer)
@@ -124,7 +154,7 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 			}
 			attrs = string(b)
 		}
-		row := tinybirdRow{
+		row := logRow{
 			EventID:    e.EventID,
 			Timestamp:  e.Timestamp,
 			Service:    e.Service,
@@ -136,7 +166,7 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 			Region:     e.Region,
 			Version:    e.Version,
 		}
-		if err := enc.Encode(row); err != nil { // Encode already writes '\n'
+		if err := enc.Encode(row); err != nil {
 			return err
 		}
 	}
@@ -158,12 +188,19 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 	}
 	gzPool.Put(gz)
 
-	u := c.baseURL + "/v0/events?name=" + url.QueryEscape(c.Datasource) + "&wait=true"
+	query := "INSERT INTO " + c.TableRef() + " FORMAT JSONEachRow"
+	u := c.baseURL + "/?" + url.Values{
+		"query":                                 {query},
+		"wait_end_of_query":                     {"1"},
+		"send_progress_in_http_headers":         {"1"},
+		"input_format_skip_unknown_fields":     {"1"},
+	}.Encode()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed.Bytes()))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.appendToken)
+	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	req.Header.Set("Content-Encoding", "gzip")
 
@@ -174,50 +211,53 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
-		return fmt.Errorf("events api: read response: %w", err)
+		return fmt.Errorf("clickhouse insert: read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &StatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(respBody))}
 	}
 
-	var ack struct {
-		SuccessfulRows  int `json:"successful_rows"`
-		QuarantinedRows int `json:"quarantined_rows"`
-	}
-	if err := json.Unmarshal(respBody, &ack); err != nil {
-		return fmt.Errorf("events api returned unexpected payload: %s", bytes.TrimSpace(respBody))
-	}
-	if ack.QuarantinedRows > 0 {
+	written, ok := writtenRows(resp.Header.Get("X-ClickHouse-Summary"))
+	if ok && written < len(events) {
 		return &StatusError{
-			Status:      200,
-			Quarantined: ack.QuarantinedRows,
-			Committed:   ack.SuccessfulRows,
-			Body:        fmt.Sprintf("quarantined %d of %d rows", ack.QuarantinedRows, len(events)),
-		}
-	}
-	if ack.SuccessfulRows < len(events) {
-		return &StatusError{
-			Status:    200,
-			Committed: ack.SuccessfulRows,
-			Body:      fmt.Sprintf("committed %d of %d rows", ack.SuccessfulRows, len(events)),
+			Status:     200,
+			Committed: written,
+			Body:       fmt.Sprintf("committed %d of %d rows", written, len(events)),
 		}
 	}
 	return nil
 }
 
-// sqlAPIResponse is Tinybird's /v0/sql FORMAT JSON payload.
-type sqlAPIResponse struct {
-	Data    []map[string]json.RawMessage `json:"data"`
-	Error   string                       `json:"error"`
-	Message string                       `json:"message"`
+func writtenRows(summary string) (int, bool) {
+	if strings.TrimSpace(summary) == "" {
+		return 0, false
+	}
+	var parsed struct {
+		WrittenRows json.RawMessage `json:"written_rows"`
+	}
+	if err := json.Unmarshal([]byte(summary), &parsed); err != nil {
+		return 0, false
+	}
+	var n int
+	if json.Unmarshal(parsed.WrittenRows, &n) == nil {
+		return n, true
+	}
+	var s string
+	if json.Unmarshal(parsed.WrittenRows, &s) == nil {
+		n, err := strconv.Atoi(s)
+		return n, err == nil
+	}
+	return 0, false
 }
 
-// Query runs a SQL statement against Tinybird using the read token.
-// Returns one map per row; values are raw JSON so callers can unmarshal
-// into strings, numbers, or nested objects (as query-coordinator does).
+type sqlAPIResponse struct {
+	Data      []map[string]json.RawMessage `json:"data"`
+	Exception string                       `json:"exception"`
+}
+
 func (c *Client) Query(ctx context.Context, sql string) ([]map[string]json.RawMessage, error) {
-	if c.readToken == "" {
-		return nil, fmt.Errorf("TINYBIRD_READ_TOKEN must be configured")
+	if c.password == "" {
+		return nil, fmt.Errorf("CLICKHOUSE_PASSWORD must be configured")
 	}
 	if strings.TrimSpace(sql) == "" {
 		return nil, fmt.Errorf("empty SQL")
@@ -228,20 +268,12 @@ func (c *Client) Query(ctx context.Context, sql string) ([]map[string]json.RawMe
 		q += " FORMAT JSON"
 	}
 
-	form := url.Values{}
-	form.Set("q", q)
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		c.baseURL+"/v0/sql",
-		strings.NewReader(form.Encode()),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/", strings.NewReader(q))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.readToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "text/plain")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -249,27 +281,33 @@ func (c *Client) Query(ctx context.Context, sql string) ([]map[string]json.RawMe
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64 MiB cap
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return nil, fmt.Errorf("sql api: read response: %w", err)
+		return nil, fmt.Errorf("clickhouse sql: read response: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("sql api returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("clickhouse sql returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var parsed sqlAPIResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("sql api: decode: %w", err)
+		return nil, fmt.Errorf("clickhouse sql: decode: %w", err)
 	}
-	if parsed.Error != "" {
-		return nil, fmt.Errorf("sql api error: %s", parsed.Error)
-	}
-	if parsed.Message != "" && parsed.Data == nil {
-		return nil, fmt.Errorf("sql api error: %s", parsed.Message)
+	if parsed.Exception != "" {
+		return nil, fmt.Errorf("clickhouse sql error: %s", parsed.Exception)
 	}
 	if parsed.Data == nil {
 		return []map[string]json.RawMessage{}, nil
 	}
 	return parsed.Data, nil
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c.user != "" {
+		req.Header.Set("X-ClickHouse-User", c.user)
+	}
+	if c.password != "" {
+		req.Header.Set("X-ClickHouse-Key", c.password)
+	}
 }

@@ -1,8 +1,7 @@
-# Initialize the platform: validate managed-service config, create Kafka topics.
+# Initialize the platform: validate config, create Kafka topics, probe ClickHouse + R2.
 #
-# Hot storage (Tinybird) and the cold archive (Cloudflare R2) are managed
-# services provisioned outside Docker (see MANAGED_SERVICES_SETUP.md). This
-# script checks that .env points at them correctly and prepares Kafka.
+# Hot storage is self-hosted ClickHouse in docker-compose. The cold archive
+# (Cloudflare R2) is provisioned outside Docker (see MANAGED_SERVICES_SETUP.md).
 #
 # PowerShell equivalent of init.sh (for Windows without Git Bash/WSL).
 # Run:  powershell -ExecutionPolicy Bypass -File .\scripts\init.ps1
@@ -18,7 +17,7 @@ Write-Host ''
 
 # 1. Load .env into process environment
 if (-not (Test-Path '.env')) {
-    Write-Host 'ERROR: .env not found. Copy .env.example to .env and fill it in (see MANAGED_SERVICES_SETUP.md).'
+    Write-Host 'ERROR: .env not found. Copy .env.example to .env and fill in R2 credentials (see MANAGED_SERVICES_SETUP.md).'
     exit 1
 }
 Get-Content '.env' | ForEach-Object {
@@ -30,9 +29,9 @@ Get-Content '.env' | ForEach-Object {
     }
 }
 
-Write-Host 'Checking managed-service configuration...'
+Write-Host 'Checking configuration...'
 $missing = $false
-$required = @('TINYBIRD_API_URL', 'TINYBIRD_APPEND_TOKEN', 'TINYBIRD_READ_TOKEN', 'TINYBIRD_DATASOURCE', 'S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY', 'S3_SECRET_KEY')
+$required = @('S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY', 'S3_SECRET_KEY')
 foreach ($var in $required) {
     $value = [Environment]::GetEnvironmentVariable($var, 'Process')
     if ([string]::IsNullOrEmpty($value)) {
@@ -77,20 +76,31 @@ docker compose exec kafka kafka-topics --create --bootstrap-server localhost:909
 Write-Host 'OK: Topics created'
 Write-Host ''
 
-# 4. Verify Tinybird auth + datasource
-Write-Host "Verifying Tinybird ($env:TINYBIRD_API_URL)..."
-$query = (@{ q = "SELECT count() AS total FROM $($env:TINYBIRD_DATASOURCE) LIMIT 1 FORMAT JSON" } | ConvertTo-Json -Compress)
+# 4. Verify ClickHouse table
+$chUrl = $env:CLICKHOUSE_URL
+if ([string]::IsNullOrEmpty($chUrl) -or $chUrl -like '*clickhouse:8123*') {
+    $chUrl = 'http://localhost:8123'
+}
+$chUser = $env:CLICKHOUSE_READ_USER
+if ([string]::IsNullOrEmpty($chUser)) { $chUser = 'logs_read' }
+$chPass = $env:CLICKHOUSE_READ_PASSWORD
+if ([string]::IsNullOrEmpty($chPass)) { $chPass = 'read' }
+$chTable = $env:CLICKHOUSE_TABLE
+if ([string]::IsNullOrEmpty($chTable)) { $chTable = 'logs' }
+Write-Host "Verifying ClickHouse ($chUrl)..."
 try {
-    Invoke-RestMethod -Method Post -Uri "$env:TINYBIRD_API_URL/v0/sql" `
-        -Headers @{ Authorization = "Bearer $($env:TINYBIRD_READ_TOKEN)" } `
-        -ContentType 'application/json' -Body $query -TimeoutSec 30 | Out-Null
-    Write-Host "OK: Tinybird datasource '$env:TINYBIRD_DATASOURCE' is queryable"
+    $pair = '{0}:{1}' -f $chUser, $chPass
+    $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+    Invoke-RestMethod -Method Post -Uri "$chUrl/" `
+        -Headers @{ Authorization = "Basic $basic" } `
+        -ContentType 'text/plain' -Body "SELECT count() AS total FROM $chTable LIMIT 1 FORMAT JSON" -TimeoutSec 30 | Out-Null
+    Write-Host "OK: ClickHouse table '$chTable' is queryable"
 } catch {
     Write-Host ''
-    Write-Host 'ERROR: Tinybird query failed. Check that:'
-    Write-Host '  - TINYBIRD_API_URL matches your workspace region'
-    Write-Host '  - the datasource exists (push tinybird/datasources/logs.datasource)'
-    Write-Host '  - TINYBIRD_READ_TOKEN has read access to the datasource'
+    Write-Host 'ERROR: ClickHouse query failed. Check that:'
+    Write-Host '  - the clickhouse service is healthy (docker compose ps)'
+    Write-Host "  - configs/clickhouse/init.sql created table '$chTable'"
+    Write-Host '  - CLICKHOUSE_READ_USER / CLICKHOUSE_READ_PASSWORD can SELECT'
     exit 1
 }
 Write-Host ''
@@ -123,6 +133,7 @@ Write-Host ''
 Write-Host '  UI:         http://localhost:3000'
 Write-Host '  Gateway:    http://localhost:8080'
 Write-Host '  Query API:  http://localhost:8081'
+Write-Host '  ClickHouse: http://localhost:8123'
 Write-Host '  Grafana:    http://localhost:3001'
 Write-Host '  Prometheus: http://localhost:9090'
 Write-Host ''

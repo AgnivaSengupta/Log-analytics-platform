@@ -7,7 +7,7 @@ import (
 
 type Config struct {
 	Kafka     KafkaConfig
-	Tinybird  TinybirdConfig
+	ClickHouse ClickHouseConfig
 	S3        S3Config
 	Gateway   GatewayConfig
 	Query     QueryConfig
@@ -25,11 +25,12 @@ type KafkaConfig struct {
 	GroupDetection string
 }
 
-type TinybirdConfig struct {
-	APIURL      string
-	AppendToken string
-	ReadToken   string
-	Datasource  string
+type ClickHouseConfig struct {
+	URL      string
+	User     string
+	Password string
+	Database string
+	Table    string
 }
 
 type S3Config struct {
@@ -65,7 +66,7 @@ type AlertConfig struct {
 
 // WorkerConfig tunes the processing-worker append pipeline: batches seal every
 // BatchSize events or FlushIntervalMs (whichever first), and up to
-// AppendConcurrency Tinybird appends run in flight per worker process.
+// AppendConcurrency ClickHouse inserts run in flight per worker process.
 type WorkerConfig struct {
 	BatchSize         int
 	FlushIntervalMs   int
@@ -82,11 +83,12 @@ func Load() *Config {
 			GroupArchive:   getEnv("KAFKA_GROUP_ARCHIVE", "archive-writers"),
 			GroupDetection: getEnv("KAFKA_GROUP_DETECTION", "detection-service"),
 		},
-		Tinybird: TinybirdConfig{
-			APIURL:      getEnv("TINYBIRD_API_URL", "https://api.tinybird.co"),
-			AppendToken: getEnv("TINYBIRD_APPEND_TOKEN", ""),
-			ReadToken:   getEnv("TINYBIRD_READ_TOKEN", ""),
-			Datasource:  getEnv("TINYBIRD_DATASOURCE", "logs"),
+		ClickHouse: ClickHouseConfig{
+			URL:      getEnv("CLICKHOUSE_URL", "http://localhost:8123"),
+			User:     getEnv("CLICKHOUSE_USER", "default"),
+			Password: getEnv("CLICKHOUSE_PASSWORD", ""),
+			Database: getEnv("CLICKHOUSE_DATABASE", "default"),
+			Table:    getEnv("CLICKHOUSE_TABLE", "logs"),
 		},
 		S3: S3Config{
 			Endpoint:     getEnv("S3_ENDPOINT", ""),

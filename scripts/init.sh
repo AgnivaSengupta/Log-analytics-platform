@@ -1,9 +1,8 @@
 #!/bin/bash
-# Initialize the platform: validate managed-service config, create Kafka topics.
+# Initialize the platform: validate config, create Kafka topics, probe ClickHouse + R2.
 #
-# Hot storage (Tinybird) and the cold archive (Cloudflare R2) are managed
-# services provisioned outside Docker (see MANAGED_SERVICES_SETUP.md). This
-# script checks that .env points at them correctly and prepares Kafka.
+# Hot storage is self-hosted ClickHouse in docker-compose. The cold archive
+# (Cloudflare R2) is provisioned outside Docker (see MANAGED_SERVICES_SETUP.md).
 
 set -e
 
@@ -17,7 +16,7 @@ echo ""
 
 # 1. Load and validate .env
 if [ ! -f .env ]; then
-    echo "ERROR: .env not found. Copy .env.example to .env and fill it in (see MANAGED_SERVICES_SETUP.md)."
+    echo "ERROR: .env not found. Copy .env.example to .env and fill in R2 credentials (see MANAGED_SERVICES_SETUP.md)."
     exit 1
 fi
 
@@ -25,9 +24,9 @@ set -a
 source .env
 set +a
 
-echo "Checking managed-service configuration..."
+echo "Checking configuration..."
 missing=0
-for var in TINYBIRD_API_URL TINYBIRD_APPEND_TOKEN TINYBIRD_READ_TOKEN TINYBIRD_DATASOURCE S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
+for var in S3_ENDPOINT S3_BUCKET S3_ACCESS_KEY S3_SECRET_KEY; do
     value="$(printenv "$var")"
     if [ -z "$value" ]; then
         echo "  MISSING: $var is empty"
@@ -72,21 +71,25 @@ docker compose exec kafka kafka-topics --create --bootstrap-server localhost:909
 echo "OK: Topics created"
 echo ""
 
-# 4. Verify Tinybird auth + datasource
-echo "Verifying Tinybird ($TINYBIRD_API_URL)..."
-query="$(printf '{"q":"SELECT count() AS total FROM %s LIMIT 1 FORMAT JSON"}' "$TINYBIRD_DATASOURCE")"
-if ! curl -sf -X POST "$TINYBIRD_API_URL/v0/sql" \
-    -H "Authorization: Bearer $TINYBIRD_READ_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$query" > /dev/null; then
+# 4. Verify ClickHouse table
+CH_URL="${CLICKHOUSE_URL:-http://localhost:8123}"
+# Host-side probe uses the published HTTP port.
+if [[ "$CH_URL" == *clickhouse:8123* ]]; then
+    CH_URL="http://localhost:8123"
+fi
+CH_USER="${CLICKHOUSE_READ_USER:-logs_read}"
+CH_PASS="${CLICKHOUSE_READ_PASSWORD:-read}"
+CH_TABLE="${CLICKHOUSE_TABLE:-logs}"
+echo "Verifying ClickHouse ($CH_URL)..."
+if ! curl -sf -u "$CH_USER:$CH_PASS" --data-binary "SELECT count() AS total FROM ${CH_TABLE} LIMIT 1 FORMAT JSON" "$CH_URL/" > /dev/null; then
     echo ""
-    echo "ERROR: Tinybird query failed. Check that:"
-    echo "  - TINYBIRD_API_URL matches your workspace region"
-    echo "  - the datasource exists (push tinybird/datasources/logs.datasource)"
-    echo "  - TINYBIRD_READ_TOKEN has read access to the datasource"
+    echo "ERROR: ClickHouse query failed. Check that:"
+    echo "  - the clickhouse service is healthy (docker compose ps)"
+    echo "  - configs/clickhouse/init.sql created table '$CH_TABLE'"
+    echo "  - CLICKHOUSE_READ_USER / CLICKHOUSE_READ_PASSWORD can SELECT"
     exit 1
 fi
-echo "OK: Tinybird datasource '$TINYBIRD_DATASOURCE' is queryable"
+echo "OK: ClickHouse table '$CH_TABLE' is queryable"
 echo ""
 
 # 5. Verify R2 endpoint reachability. An unsigned request cannot authenticate,
@@ -114,6 +117,7 @@ echo ""
 echo "  UI:         http://localhost:3000"
 echo "  Gateway:    http://localhost:8080"
 echo "  Query API:  http://localhost:8081"
+echo "  ClickHouse: http://localhost:8123"
 echo "  Grafana:    http://localhost:3001"
 echo "  Prometheus: http://localhost:9090"
 echo ""

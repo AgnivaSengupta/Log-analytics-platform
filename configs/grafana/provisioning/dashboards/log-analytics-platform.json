@@ -113,7 +113,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "rate(worker_flush_failures_total[5m])",
-          "legendFormat": "tinybird flush failures",
+          "legendFormat": "clickhouse flush failures",
           "refId": "A"
         },
         {
@@ -261,7 +261,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Worker Tinybird append p95 per batch",
+      "title": "Worker ClickHouse insert p95 per batch",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
       "id": 17,

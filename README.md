@@ -1,8 +1,8 @@
 # Distributed Log Analytics Platform
 
-A production-grade distributed log analytics system built with Go, Kafka, Tinybird, and Cloudflare R2. Designed to demonstrate distributed-system fundamentals: partitioning, replay, horizontal scaling, backpressure, and failure recovery.
+A production-grade distributed log analytics system built with Go, Kafka, ClickHouse, and Cloudflare R2. Designed to demonstrate distributed-system fundamentals: partitioning, replay, horizontal scaling, backpressure, and failure recovery.
 
-Kafka, the gateways, workers, detection, alerting, and the UI run in Docker. Tinybird is the managed hot analytics store and Cloudflare R2 is the managed raw archive. No local database or object-store containers are used.
+Kafka, ClickHouse, the gateways, workers, detection, alerting, and the UI run in Docker. ClickHouse is the self-hosted hot analytics store and Cloudflare R2 is the managed raw archive.
 
 > **📐 Design & architecture:** [`ARCHITECTURE.md`](ARCHITECTURE.md) is the full
 > reference for the system as built — component contracts, the durability
@@ -19,8 +19,8 @@ Producers → OpenTelemetry Collector → Load Balancer → Gateways → Kafka
                           │                                      │
                     Processing Workers              Raw Archive Writer
                           │                                      │
-                       Tinybird                           Cloudflare R2
-                       (managed)                            (managed)
+                       ClickHouse                         Cloudflare R2
+                       (self-hosted)                        (managed)
                           │                                      │
                           └──────── Query Coordinator ───────────┘
                                               │
@@ -33,14 +33,12 @@ Kafka → Detection Service → Alert Service → Webhook/Pager
 
 ### Prerequisites
 - Docker and Docker Compose
-- A Tinybird workspace with a `logs` datasource (see `tinybird/datasources/logs.datasource`)
 - A Cloudflare R2 bucket with an API token (object read + write)
 - 4GB+ RAM recommended
 
-> **First-time setup:** copy `.env.example` to `.env`, provision the managed
-> services and fill it in by following
-> [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md) before starting the
-> stack.
+> **First-time setup:** copy `.env.example` to `.env` and fill in R2 credentials
+> by following [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md) before
+> starting the stack. ClickHouse starts inside Compose.
 
 ### Start the Platform
 
@@ -64,7 +62,7 @@ curl http://localhost:8080/health
 | Gateway | http://localhost:8080 |
 | Grafana | http://localhost:3001 (admin/admin) |
 | Prometheus | http://localhost:9090 |
-| Tinybird dashboard | Your Tinybird workspace (managed) |
+| ClickHouse HTTP | http://localhost:8123 |
 | R2 bucket browser | Cloudflare dashboard -> R2 (managed) |
 
 ### Run Benchmarks
@@ -99,9 +97,9 @@ Stateless HTTP ingestion gateway. Authenticates producers, validates events, enf
 - **Health:** `/health`
 
 ### Processing Workers (`cmd/worker`)
-Kafka consumer group that normalizes, enriches, and redacts events before appending them to Tinybird via the Events API (`wait=true`). Commits Kafka offsets only after Tinybird acknowledges the batch.
+Kafka consumer group that normalizes, enriches, and redacts events before inserting them into ClickHouse over HTTP (`JSONEachRow`, `wait_end_of_query=1`). Commits Kafka offsets only after ClickHouse acknowledges the batch.
 
-- **Pipeline:** poll/normalize loop seals batches (2000 events or 250 ms) into a bounded queue; 4 append workers POST to Tinybird concurrently while polling continues; offsets commit only for the contiguous acknowledged prefix
+- **Pipeline:** poll/normalize loop seals batches (2000 events or 250 ms) into a bounded queue; 4 insert workers POST to ClickHouse concurrently while polling continues; offsets commit only for the contiguous acknowledged prefix
 - **Tuning:** `WORKER_BATCH_SIZE`, `WORKER_FLUSH_INTERVAL_MS`, `WORKER_APPEND_CONCURRENCY`
 - **Dead letter queue:** Unparseable events go to `logs-dlq` topic (offsets still advance)
 
@@ -120,7 +118,7 @@ Real-time stream processor that evaluates sliding-window rules:
 
 ### Query Coordinator (`cmd/query-coordinator`)
 Unified search API that routes queries to the appropriate storage tier:
-- **Hot (0-7 days):** Tinybird for fast interactive queries
+- **Hot (0-7 days):** ClickHouse for fast interactive queries
 - **Cold (7+ days):** Cloudflare R2 for historical analysis
 - **Merged:** Spans both tiers with result merging
 
@@ -155,7 +153,7 @@ Search and analytics dashboard with:
 ### Delivery Semantics
 - **At-least-once** delivery end to end
 - Gateway ACKs only after Kafka replication succeeds
-- Worker offsets committed only after Tinybird acknowledges the batch
+- Worker offsets committed only after ClickHouse acknowledges the batch
 - Archive offsets committed only after R2 confirms the object write
 - Unparseable events are diverted to the `logs-dlq` topic, never silently dropped
 
@@ -167,10 +165,12 @@ All configuration is via environment variables (see `.env`):
 |----------|---------|-------------|
 | `KAFKA_BROKERS` | `kafka:29092` | Kafka bootstrap servers (internal listener) |
 | `KAFKA_TOPIC_LOGS` | `logs` | Main log topic |
-| `TINYBIRD_API_URL` | `https://api.tinybird.co` | Tinybird API host for your region |
-| `TINYBIRD_DATASOURCE` | `logs` | Tinybird datasource name |
-| `TINYBIRD_APPEND_TOKEN` | (required) | Token with `DATASOURCE:APPEND` on the datasource |
-| `TINYBIRD_READ_TOKEN` | (required) | Token with read access to the datasource |
+| `CLICKHOUSE_URL` | `http://clickhouse:8123` | ClickHouse HTTP interface |
+| `CLICKHOUSE_TABLE` | `logs` | Hot-tier table name |
+| `CLICKHOUSE_APPEND_USER` | `logs_append` | Insert-only user used by workers |
+| `CLICKHOUSE_APPEND_PASSWORD` | `append` | Password for the insert user |
+| `CLICKHOUSE_READ_USER` | `logs_read` | Select-only user used by the query coordinator |
+| `CLICKHOUSE_READ_PASSWORD` | `read` | Password for the read user |
 | `S3_ENDPOINT` | (required) | R2 S3 endpoint: `https://<account-id>.r2.cloudflarestorage.com` |
 | `S3_REGION` | `auto` | R2 region (always `auto`) |
 | `S3_BUCKET` | `log-archive` | R2 bucket (created in Cloudflare) |
@@ -178,7 +178,7 @@ All configuration is via environment variables (see `.env`):
 | `S3_SECRET_KEY` | (required) | R2 API token secret |
 | `GATEWAY_INGEST_QUOTA_PER_SEC` | `100000` | Per-gateway rate limit |
 | `DETECTION_ERROR_RATE_THRESHOLD` | `0.05` | Error rate alert threshold |
-| `QUERY_HOT_RETENTION_DAYS` | `7` | Days served from Tinybird before cold |
+| `QUERY_HOT_RETENTION_DAYS` | `7` | Days served from ClickHouse before cold |
 
 The `S3_*` variables configure R2 over its S3-compatible API; no AWS or
 local object store is involved.
@@ -218,7 +218,7 @@ docker compose up -d --scale archive-writer=2
 1. **Ingestion Pipeline:** Ingest rate, rejection rate, gateway latency
 2. **Processing Pipeline:** Worker throughput, batch size, processing latency
 3. **Kafka Health:** Consumer lag, partition distribution
-4. **Storage:** Tinybird append latency, query P50/P95/P99, R2 write rate
+4. **Storage:** ClickHouse insert latency, query P50/P95/P99, R2 write rate
 5. **Detection:** Alert rate, detection latency, window states
 
 ## Failure Scenarios
@@ -226,7 +226,7 @@ docker compose up -d --scale archive-writer=2
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Worker crash | Consumer group rebalances; another worker resumes from last committed offset |
-| Tinybird unavailable | Kafka backlog grows; archive/detection remain independent; backlog drains on recovery |
+| ClickHouse unavailable | Kafka backlog grows; archive/detection remain independent; backlog drains on recovery |
 | Traffic spike | Kafka buffers excess; gateways issue 429 above quota |
 | Gateway crash | LB routes to healthy replicas; producers retry with idempotency |
 | Bad event format | Processor sends to dead-letter topic for inspection |
@@ -248,7 +248,7 @@ log-analytics-platform/
 │   ├── models/               # Shared data models
 │   ├── config/               # Configuration loading
 │   ├── kafka/                # Kafka producer/consumer
-│   ├── tinybird/             # Tinybird client
+│   ├── clickhouse/           # ClickHouse HTTP client
 │   ├── storage/              # Cloudflare R2 client (S3 API)
 │   └── detection/            # Detection engine
 ├── ui/                       # React frontend

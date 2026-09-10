@@ -43,9 +43,31 @@ services:
       timeout: 10s
       retries: 5
 
-  # Hot storage is Tinybird (managed) and the cold archive is Cloudflare R2
-  # (managed). No local database or object-store containers are used.
-  # See MANAGED_SERVICES_SETUP.md before starting the stack.
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:-clickhouse}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./configs/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Cold archive is Cloudflare R2 (managed). See MANAGED_SERVICES_SETUP.md.
 
   # Application Services
   gateway:
@@ -74,14 +96,18 @@ services:
       - KAFKA_TOPIC_LOGS=logs
       - KAFKA_TOPIC_DLQ=logs-dlq
       - KAFKA_GROUP_WORKERS=processing-workers
-      - TINYBIRD_API_URL=${TINYBIRD_API_URL}
-      - TINYBIRD_APPEND_TOKEN=${TINYBIRD_APPEND_TOKEN}
-      - TINYBIRD_DATASOURCE=${TINYBIRD_DATASOURCE}
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_APPEND_USER:-logs_append}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_APPEND_PASSWORD:-append}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-default}
+      - CLICKHOUSE_TABLE=${CLICKHOUSE_TABLE:-logs}
       - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-5000}
       - WORKER_FLUSH_INTERVAL_MS=${WORKER_FLUSH_INTERVAL_MS:-250}
       - WORKER_APPEND_CONCURRENCY=${WORKER_APPEND_CONCURRENCY:-16}
     depends_on:
       kafka:
+        condition: service_healthy
+      clickhouse:
         condition: service_healthy
     restart: unless-stopped
 
@@ -128,15 +154,20 @@ services:
       - "8081:8081"
     environment:
       - QUERY_COORDINATOR_PORT=8081
-      - TINYBIRD_API_URL=${TINYBIRD_API_URL}
-      - TINYBIRD_READ_TOKEN=${TINYBIRD_READ_TOKEN}
-      - TINYBIRD_DATASOURCE=${TINYBIRD_DATASOURCE}
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_READ_USER:-logs_read}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_READ_PASSWORD:-read}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-default}
+      - CLICKHOUSE_TABLE=${CLICKHOUSE_TABLE:-logs}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_REGION=${S3_REGION}
       - S3_BUCKET=${S3_BUCKET}
       - S3_ACCESS_KEY=${S3_ACCESS_KEY}
       - S3_SECRET_KEY=${S3_SECRET_KEY}
       - QUERY_HOT_RETENTION_DAYS=7
+    depends_on:
+      clickhouse:
+        condition: service_healthy
     restart: unless-stopped
 
   alert-service:
@@ -206,3 +237,4 @@ services:
 volumes:
   prometheus_data:
   grafana_data:
+  clickhouse_data:

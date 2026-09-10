@@ -1,16 +1,18 @@
-# Managed services setup
+# External services setup
 
-This deployment keeps Kafka, the gateway, workers, detection, alerting, and
-the user interface in Docker. Tinybird is the hot analytics store and
-Cloudflare R2 is the raw, long-retention archive. No local database or
-object-store containers are used: every `S3_*` setting in `.env` points at R2
-over its S3-compatible API.
+This deployment runs Kafka, ClickHouse, the gateway, workers, detection,
+alerting, and the user interface in Docker. ClickHouse is the hot analytics
+store. Cloudflare R2 remains the raw, long-retention archive. Every `S3_*`
+setting in `.env` points at R2 over its S3-compatible API.
 
-## 1. Create the Tinybird datasource
+## 1. ClickHouse (in Docker)
 
-Create a datasource named `logs` (or set `TINYBIRD_DATASOURCE` to its name)
-with this schema. The `attributes` column intentionally stores JSON text so
-unstructured application fields are retained without changing the schema.
+No Tinybird workspace is required. `docker compose up` starts ClickHouse and
+applies `configs/clickhouse/init.sql`, which creates:
+
+- table `logs` (MergeTree, daily partitions, 30-day TTL)
+- insert-only user `logs_append` (workers)
+- select-only user `logs_read` (query coordinator)
 
 | Column | Type |
 | --- | --- |
@@ -25,24 +27,14 @@ unstructured application fields are retained without changing the schema.
 | region | LowCardinality(String) |
 | version | LowCardinality(String) |
 
-Two ways to create it:
+The `attributes` column stores JSON text so unstructured application fields
+are retained without changing the schema.
 
-- **Tinybird CLI (recommended, reproducible):** authenticate with `tb auth`,
-  then from the repo root run
-  `tb push tinybird/datasources/logs.datasource --force`. The checked-in
-  `.datasource` file defines the schema above plus a sorting key, daily
-  partitions, and a 30-day TTL.
-- **Dashboard:** create an empty datasource and add the columns manually.
+HTTP interface: http://localhost:8123 (native protocol on 9000).
 
-Then create two tokens in the Tinybird dashboard:
-
-- an append token with `DATASOURCE:APPEND` on the `logs` datasource, stored
-  as `TINYBIRD_APPEND_TOKEN` (used by the processing workers);
-- a read token with read access to the datasource, stored as
-  `TINYBIRD_READ_TOKEN` (used by the query coordinator).
-
-Set `TINYBIRD_API_URL` to the API host for your Tinybird region (for example
-`https://api.tinybird.co` for the default region).
+Default local passwords are in `.env.example`. Change
+`CLICKHOUSE_APPEND_PASSWORD` / `CLICKHOUSE_READ_PASSWORD` together with
+`configs/clickhouse/init.sql` if you do not want the demo credentials.
 
 ## 2. Create the R2 archive bucket
 
@@ -59,7 +51,7 @@ the application.
 
 ## 3. Start and verify
 
-Copy `.env.example` to `.env`, replace every `REPLACE_WITH_...` value, then run:
+Copy `.env.example` to `.env`, replace every `REPLACE_WITH_...` R2 value, then run:
 
 ```bash
 docker compose up -d --build
@@ -81,16 +73,15 @@ curl -X POST http://localhost:8080/v1/ingest \
   -d '{"events": [{"event_id": "smoke-001", "timestamp": "2026-09-09T00:00:00.000Z", "service": "smoke", "severity": "INFO", "message": "managed storage smoke test"}]}'
 ```
 
-Then verify it in both managed stores:
+Then verify it in both stores:
 
-- **Tinybird:** query
-  `SELECT * FROM logs WHERE service = 'smoke' ORDER BY timestamp DESC LIMIT 10`
-  in the Tinybird dashboard, or search for it in the UI at
-  http://localhost:3000.
+- **ClickHouse:** `SELECT * FROM logs WHERE service = 'smoke' ORDER BY timestamp DESC LIMIT 10` via
+  `curl -u logs_read:read --data-binary "SELECT * FROM logs WHERE service = 'smoke' ORDER BY timestamp DESC LIMIT 10 FORMAT Pretty" http://localhost:8123/`
+  or search for it in the UI at http://localhost:3000.
 - **R2:** browse the bucket in the Cloudflare dashboard for a new object
   under `raw/<YYYY>/<MM>/<DD>/<HH>/smoke/`.
 
-The worker only commits a Kafka offset after Tinybird acknowledges the
-append; the archive writer independently commits only after R2 confirms the
-object write. If a managed service is unreachable, its consumer group
-backlogs in Kafka and drains automatically on recovery.
+The worker only commits a Kafka offset after ClickHouse acknowledges the
+insert (`wait_end_of_query=1` plus written-row checks); the archive writer
+independently commits only after R2 confirms the object write. If a store is
+unreachable, its consumer group backlogs in Kafka and drains on recovery.

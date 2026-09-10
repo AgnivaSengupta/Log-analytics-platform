@@ -209,7 +209,7 @@ func NewConsumer(cfg config.KafkaConfig, groupID string, topics []string, logger
 		"enable.auto.commit":    false,
 		"session.timeout.ms":    30000,
 		"heartbeat.interval.ms": 3000,
-		// The worker's batch channel is real backpressure: when the Tinybird sink
+		// The worker's batch channel is real backpressure: when the ClickHouse sink
 		// stalls, sealing blocks and polls pause. A long max.poll.interval keeps
 		// the group from evicting a healthy-but-waiting consumer (heartbeats
 		// still flow on the background thread, so truly dead processes are

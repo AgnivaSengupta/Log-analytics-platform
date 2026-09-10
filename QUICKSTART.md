@@ -2,7 +2,7 @@
 
 ## 1. Start the Platform
 
-> **Prerequisite:** copy `.env.example` to `.env`, provision Tinybird + R2, and fill it in first.
+> **Prerequisite:** copy `.env.example` to `.env`, fill in R2 credentials, then start Compose (ClickHouse is included).
 > See [MANAGED_SERVICES_SETUP.md](MANAGED_SERVICES_SETUP.md).
 
 ```bash
@@ -27,7 +27,7 @@ docker compose ps
 | **Query API** | http://localhost:8081 | - |
 | **Grafana** | http://localhost:3001 | admin / admin |
 | **Prometheus** | http://localhost:9090 | - |
-| **Tinybird dashboard** | your Tinybird workspace | your Tinybird login |
+| **ClickHouse HTTP** | http://localhost:8123 | logs_read / read |
 | **R2 bucket browser** | Cloudflare dashboard -> R2 | your Cloudflare login |
 
 ## 3. Ingest Sample Logs
@@ -147,12 +147,8 @@ docker compose exec kafka kafka-console-consumer \
   --topic logs \
   --from-beginning
 
-# Check hot storage (Tinybird) - source .env first so the tokens are set
-source .env
-curl -s -X POST "$TINYBIRD_API_URL/v0/sql" \
-  -H "Authorization: Bearer $TINYBIRD_READ_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"q":"SELECT count() AS total FROM logs FORMAT JSON"}'
+# Check hot storage (ClickHouse)
+curl -s -u logs_read:read --data-binary "SELECT count() AS total FROM logs FORMAT JSON" http://localhost:8123/
 ```
 
 ## 9. Common Issues
@@ -180,16 +176,12 @@ docker compose exec kafka kafka-broker-api-versions --bootstrap-server localhost
 docker compose exec kafka kafka-topics --list --bootstrap-server localhost:9092
 ```
 
-### Tinybird connection issues
+### ClickHouse connection issues
 ```bash
-# Verify the token, regional host, and datasource name from .env
-source .env
-curl -s -X POST "$TINYBIRD_API_URL/v0/sql" \
-  -H "Authorization: Bearer $TINYBIRD_READ_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"q":"SELECT 1 AS ok FORMAT JSON"}'
-# A 401 means a wrong token; a 404/empty result usually means the
-# datasource name does not match TINYBIRD_DATASOURCE.
+# Verify the HTTP interface and table from compose
+curl -s -u logs_read:read --data-binary "SELECT 1 AS ok FORMAT JSON" http://localhost:8123/
+# A 401/403 means wrong user/password; a missing-table exception means
+# init.sql did not run (usually because the clickhouse_data volume already existed).
 ```
 
 ### R2 connection issues
@@ -219,11 +211,11 @@ docker compose down -v
 ## Architecture Quick Reference
 
 ```
-Gateway (8080) → Kafka → Worker → Tinybird (managed hot)
+Gateway (8080) → Kafka → Worker → ClickHouse (self-hosted hot)
                        → Archive Writer → Cloudflare R2 (managed cold)
                        → Detection → Alert Service
                        
-Query Coordinator (8081) → Tinybird (hot) + R2 (cold)
+Query Coordinator (8081) → ClickHouse (hot) + R2 (cold)
 ```
 
 ## Key Files

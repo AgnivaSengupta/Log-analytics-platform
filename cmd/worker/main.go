@@ -23,17 +23,17 @@ import (
 	"github.com/log-analytics-platform/internal/config"
 	kafkalib "github.com/log-analytics-platform/internal/kafka"
 	"github.com/log-analytics-platform/internal/models"
-	"github.com/log-analytics-platform/internal/tinybird"
+	"github.com/log-analytics-platform/internal/clickhouse"
 )
 
 var (
 	eventsProcessed = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_events_processed_total",
-		Help: "Events normalized (not yet acknowledged by Tinybird)",
+		Help: "Events normalized (not yet acknowledged by ClickHouse)",
 	})
 	eventsAppended = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_events_appended_total",
-		Help: "Events acknowledged by Tinybird",
+		Help: "Events acknowledged by ClickHouse",
 	})
 	eventsDeadLettered = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_events_dead_lettered_total",
@@ -46,12 +46,12 @@ var (
 	})
 	batchSizeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "worker_batch_size",
-		Help:    "Events per sealed Tinybird batch",
+		Help:    "Events per sealed ClickHouse batch",
 		Buckets: []float64{1, 10, 50, 100, 500, 1000, 2000, 5000},
 	})
 	flushFailures = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_flush_failures_total",
-		Help: "Failed Tinybird append attempts (retried if transient)",
+		Help: "Failed ClickHouse insert attempts (retried if transient)",
 	})
 	offsetsCommitted = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "worker_offsets_committed_total",
@@ -59,12 +59,12 @@ var (
 	})
 	appendLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "worker_append_latency_seconds",
-		Help:    "Tinybird append round-trip per attempt",
+		Help:    "ClickHouse insert round-trip per attempt",
 		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
 	})
 	appendInflight = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "worker_append_inflight",
-		Help: "Tinybird appends currently in flight",
+		Help: "ClickHouse inserts currently in flight",
 	})
 	batchesPending = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "worker_batches_pending",
@@ -146,29 +146,29 @@ func (b *batcher) seal(seq uint64) *sealedBatch {
 }
 
 type Processor struct {
-	cfg      *config.Config
-	tinybird *tinybird.Client
-	producer *kafkalib.Producer
-	logger   *zap.Logger
+	cfg        *config.Config
+	clickhouse *clickhouse.Client
+	producer   *kafkalib.Producer
+	logger     *zap.Logger
 }
 
 func NewProcessor(cfg *config.Config, logger *zap.Logger) (*Processor, error) {
-	if cfg.Tinybird.AppendToken == "" {
-		return nil, fmt.Errorf("TINYBIRD_APPEND_TOKEN must be configured")
+	if cfg.ClickHouse.Password == "" {
+		return nil, fmt.Errorf("CLICKHOUSE_PASSWORD must be configured")
 	}
-	tb, err := tinybird.NewClient(cfg.Tinybird, logger)
+	ch, err := clickhouse.NewClient(cfg.ClickHouse, logger)
 	if err != nil {
-		return nil, fmt.Errorf("tinybird client: %w", err)
+		return nil, fmt.Errorf("clickhouse client: %w", err)
 	}
 	producer, err := kafkalib.NewProducer(cfg.Kafka, logger)
 	if err != nil {
 		return nil, fmt.Errorf("kafka producer: %w", err)
 	}
 	return &Processor{
-		cfg:      cfg,
-		tinybird: tb,
-		producer: producer,
-		logger:   logger,
+		cfg:        cfg,
+		clickhouse: ch,
+		producer:   producer,
+		logger:     logger,
 	}, nil
 }
 
@@ -274,7 +274,7 @@ func isRetryable(err error) bool {
 	permanent := []string{
 		"quarantined",
 		"unexpected payload",
-		"append token",
+		"clickhouse password",
 		"returned 400",
 		"returned 401",
 		"returned 403",
@@ -301,7 +301,7 @@ func (p *Processor) appendWithRetry(shutdownCtx context.Context, batch *sealedBa
 	for attempt := 1; ; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		start := time.Now()
-		err := p.tinybird.AppendEvents(attemptCtx, batch.events)
+		err := p.clickhouse.AppendEvents(attemptCtx, batch.events)
 		appendLatency.Observe(time.Since(start).Seconds())
 		cancel()
 		if err == nil {

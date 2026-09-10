@@ -186,7 +186,7 @@ this repository's CI (see [§12.4](#124-measurement-method)).
   build time; `librdkafka1`/`librdkafka` at run time. Only the load generator
   builds with `CGO_ENABLED=0`.
 * **Managed dependencies must exist before boot.** The workers fail fast without
-  `TINYBIRD_APPEND_TOKEN`; the archive writer and query coordinator fail fast
+  `CLICKHOUSE_APPEND_PASSWORD`; the archive writer and query coordinator fail fast
   without R2 credentials. There is no "run without storage" mode.
 * **Producers own the event contract.** The gateway does not transform payloads
   beyond filling `event_id`/`timestamp`; anything a producer sends outside
@@ -1307,8 +1307,8 @@ The part that is designed deliberately, per least privilege:
 
 | Secret | Held by | Scope |
 |---|---|---|
-| `TINYBIRD_APPEND_TOKEN` | workers only | `DATASOURCE:APPEND` on `logs` — cannot read |
-| `TINYBIRD_READ_TOKEN` | query coordinator only | read on `logs` — cannot write |
+| `CLICKHOUSE_APPEND_PASSWORD` | workers only | `DATASOURCE:APPEND` on `logs` — cannot read |
+| `CLICKHOUSE_READ_PASSWORD` | query coordinator only | read on `logs` — cannot write |
 | `S3_ACCESS_KEY`/`SECRET` | archive writer **and** query coordinator | R2 token scoped to `S3_BUCKET`, Object Read & Write |
 | Kafka | — | no credentials (open) |
 | `ALERT_WEBHOOK_URL` | alert service | bearer-less webhook |
@@ -1486,11 +1486,10 @@ malformed number silently becomes the default).
 |---|---|---|---|
 | `KAFKA_BROKERS` | `localhost:9092` (`kafka:29092` in compose) | all Go services | internal listener |
 | `KAFKA_TOPIC_LOGS` / `KAFKA_TOPIC_DLQ` | `logs` / `logs-dlq` | gateway, worker, detection, archive, alert | |
-| `KAFKA_GROUP_WORKERS` / `_ARCHIVE` / `_DETECTION` | `processing-workers` / `archive-writers` / `detection-service` | respective consumers | **new group id = full replay** |
-| `TINYBIRD_API_URL` | `https://api.tinybird.co` | worker, query | must match workspace region |
-| `TINYBIRD_APPEND_TOKEN` | *required* | worker | fail-fast if empty |
-| `TINYBIRD_READ_TOKEN` | *required* | query | fail-fast if empty |
-| `TINYBIRD_DATASOURCE` | `logs` | worker, query | one knob for hot tier + replay target |
+| `CLICKHOUSE_URL` | `http://localhost:8123` (`http://clickhouse:8123` in compose) | worker, query | ClickHouse HTTP endpoint |
+| `CLICKHOUSE_DATABASE` / `CLICKHOUSE_TABLE` | `default` / `logs` | worker, query | database and table names |
+| `CLICKHOUSE_APPEND_USER` / `_PASSWORD` | `logs_append` / `append` | worker | insert-only credentials |
+| `CLICKHOUSE_READ_USER` / `_PASSWORD` | `logs_read` / `read` | query | select-only credentials |
 | `S3_ENDPOINT` | *required* | archive, query | `https://<acct>.r2.cloudflarestorage.com` |
 | `S3_REGION` | `auto` | archive, query | R2 constant |
 | `S3_BUCKET` | `log-archive` | archive, query | |
