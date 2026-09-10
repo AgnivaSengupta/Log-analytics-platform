@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -90,6 +91,22 @@ func (qc *QueryCoordinator) hotWhere(req models.QueryRequest) string {
 	return " WHERE " + strings.Join(parts, " AND ")
 }
 
+func unmarshalInt64(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int64
+	if json.Unmarshal(raw, &n) == nil {
+		return n
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		parsed, _ := strconv.ParseInt(s, 10, 64)
+		return parsed
+	}
+	return 0
+}
+
 func (qc *QueryCoordinator) hotQuery(ctx context.Context, req models.QueryRequest) ([]models.LogEvent, int64, error) {
 	where := qc.hotWhere(req)
 	countRows, err := qc.clickhouse.Query(ctx, "SELECT count() AS total FROM "+qc.clickhouse.TableRef()+where)
@@ -98,7 +115,7 @@ func (qc *QueryCoordinator) hotQuery(ctx context.Context, req models.QueryReques
 	}
 	var total int64
 	if len(countRows) > 0 {
-		_ = json.Unmarshal(countRows[0]["total"], &total)
+		total = unmarshalInt64(countRows[0]["total"])
 	}
 	query := fmt.Sprintf("SELECT event_id, timestamp, service, severity, message, attributes, trace_id, source, region, version FROM %s%s ORDER BY timestamp DESC LIMIT %d OFFSET %d", qc.clickhouse.TableRef(), where, req.Limit, req.Offset)
 	rows, err := qc.clickhouse.Query(ctx, query)
@@ -142,19 +159,40 @@ func (qc *QueryCoordinator) hotQuery(ctx context.Context, req models.QueryReques
 }
 
 func (qc *QueryCoordinator) hotTimeline(ctx context.Context, service string, start, end time.Time, seconds int) ([]map[string]interface{}, error) {
-	req := models.QueryRequest{Service: service, StartTime: start, EndTime: end}
-	query := fmt.Sprintf("SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket, count() AS count, countIf(severity = 'ERROR') AS error_count FROM %s%s GROUP BY bucket ORDER BY bucket", seconds, qc.clickhouse.TableRef(), qc.hotWhere(req))
+	where := fmt.Sprintf("WHERE bucket >= %s AND bucket <= %s",
+		sqlLiteral(start.UTC().Format("2006-01-02 15:04:05")),
+		sqlLiteral(end.UTC().Format("2006-01-02 15:04:05")),
+	)
+	if service != "" {
+		where += " AND service = " + sqlLiteral(service)
+	}
+
+	tableRef := "logs_metrics_mv"
+	if qc.clickhouse.Database != "" && qc.clickhouse.Database != "default" {
+		tableRef = qc.clickhouse.Database + ".logs_metrics_mv"
+	}
+
+	query := fmt.Sprintf("SELECT toStartOfInterval(bucket, INTERVAL %d SECOND) AS bucket, sum(count) AS count, sum(error_count) AS error_count FROM %s %s GROUP BY bucket ORDER BY bucket", seconds, tableRef, where)
 	rows, err := qc.clickhouse.Query(ctx, query)
 	if err != nil {
-		return nil, err
+		req := models.QueryRequest{Service: service, StartTime: start, EndTime: end}
+		rawQuery := fmt.Sprintf("SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket, count() AS count, countIf(severity = 'ERROR') AS error_count FROM %s%s GROUP BY bucket ORDER BY bucket", seconds, qc.clickhouse.TableRef(), qc.hotWhere(req))
+		rows, err = qc.clickhouse.Query(ctx, rawQuery)
+		if err != nil {
+			return nil, err
+		}
 	}
 	result := make([]map[string]interface{}, 0, len(rows))
 	for _, row := range rows {
 		entry := map[string]interface{}{}
 		for key, raw := range row {
-			var value interface{}
-			_ = json.Unmarshal(raw, &value)
-			entry[key] = value
+			if key == "count" || key == "error_count" {
+				entry[key] = unmarshalInt64(raw)
+			} else {
+				var value interface{}
+				_ = json.Unmarshal(raw, &value)
+				entry[key] = value
+			}
 		}
 		result = append(result, entry)
 	}
@@ -162,17 +200,29 @@ func (qc *QueryCoordinator) hotTimeline(ctx context.Context, service string, sta
 }
 
 func (qc *QueryCoordinator) hotAggregateCount(ctx context.Context, start, end time.Time) (map[string]map[string]int64, error) {
-	rows, err := qc.clickhouse.Query(ctx, "SELECT service, severity, count() AS count FROM "+qc.clickhouse.TableRef()+qc.hotWhere(models.QueryRequest{StartTime: start, EndTime: end})+" GROUP BY service, severity")
+	where := fmt.Sprintf("WHERE bucket >= %s AND bucket <= %s",
+		sqlLiteral(start.UTC().Format("2006-01-02 15:04:05")),
+		sqlLiteral(end.UTC().Format("2006-01-02 15:04:05")),
+	)
+	tableRef := "logs_metrics_mv"
+	if qc.clickhouse.Database != "" && qc.clickhouse.Database != "default" {
+		tableRef = qc.clickhouse.Database + ".logs_metrics_mv"
+	}
+
+	query := fmt.Sprintf("SELECT service, severity, sum(count) AS count FROM %s %s GROUP BY service, severity", tableRef, where)
+	rows, err := qc.clickhouse.Query(ctx, query)
 	if err != nil {
-		return nil, err
+		rows, err = qc.clickhouse.Query(ctx, "SELECT service, severity, count() AS count FROM "+qc.clickhouse.TableRef()+qc.hotWhere(models.QueryRequest{StartTime: start, EndTime: end})+" GROUP BY service, severity")
+		if err != nil {
+			return nil, err
+		}
 	}
 	result := make(map[string]map[string]int64)
 	for _, row := range rows {
 		var service, severity string
-		var count int64
 		_ = json.Unmarshal(row["service"], &service)
 		_ = json.Unmarshal(row["severity"], &severity)
-		_ = json.Unmarshal(row["count"], &count)
+		count := unmarshalInt64(row["count"])
 		if result[service] == nil {
 			result[service] = map[string]int64{}
 		}
@@ -321,12 +371,19 @@ func (qc *QueryCoordinator) handleTimeline(w http.ResponseWriter, r *http.Reques
 		fmt.Sscanf(h, "%d", &hours)
 	}
 
+	hotCutoff := time.Now().Add(-time.Duration(qc.cfg.Query.HotRetentionDays) * 24 * time.Hour)
 	startTime := time.Now().Add(-time.Duration(hours) * time.Hour)
+	if startTime.Before(hotCutoff) {
+		startTime = hotCutoff
+	}
 	endTime := time.Now()
 
 	bucketSeconds := 300 // 5 minutes
 	if hours > 168 {     // > 7 days
 		bucketSeconds = 3600 // 1 hour
+	}
+	if hours > 720 {     // > 30 days
+		bucketSeconds = 86400 // 1 day
 	}
 
 	ctx := r.Context()
@@ -351,7 +408,11 @@ func (qc *QueryCoordinator) handleAggregates(w http.ResponseWriter, r *http.Requ
 		fmt.Sscanf(h, "%d", &hours)
 	}
 
+	hotCutoff := time.Now().Add(-time.Duration(qc.cfg.Query.HotRetentionDays) * 24 * time.Hour)
 	startTime := time.Now().Add(-time.Duration(hours) * time.Hour)
+	if startTime.Before(hotCutoff) {
+		startTime = hotCutoff
+	}
 	endTime := time.Now()
 
 	ctx := r.Context()

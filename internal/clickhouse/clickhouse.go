@@ -119,16 +119,16 @@ func (c *Client) TableRef() string {
 }
 
 type logRow struct {
-	EventID    string    `json:"event_id"`
-	Timestamp  time.Time `json:"timestamp"`
-	Service    string    `json:"service"`
-	Severity   string    `json:"severity"`
-	Message    string    `json:"message"`
-	Attributes string    `json:"attributes"`
-	TraceID    string    `json:"trace_id"`
-	Source     string    `json:"source"`
-	Region     string    `json:"region"`
-	Version    string    `json:"version"`
+	EventID    string `json:"event_id"`
+	Timestamp  string `json:"timestamp"`
+	Service    string `json:"service"`
+	Severity   string `json:"severity"`
+	Message    string `json:"message"`
+	Attributes string `json:"attributes"`
+	TraceID    string `json:"trace_id"`
+	Source     string `json:"source"`
+	Region     string `json:"region"`
+	Version    string `json:"version"`
 }
 
 func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) error {
@@ -156,7 +156,7 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 		}
 		row := logRow{
 			EventID:    e.EventID,
-			Timestamp:  e.Timestamp,
+			Timestamp:  e.Timestamp.UTC().Format("2006-01-02 15:04:05.000"),
 			Service:    e.Service,
 			Severity:   e.Severity,
 			Message:    e.Message,
@@ -190,10 +190,11 @@ func (c *Client) AppendEvents(ctx context.Context, events []models.LogEvent) err
 
 	query := "INSERT INTO " + c.TableRef() + " FORMAT JSONEachRow"
 	u := c.baseURL + "/?" + url.Values{
-		"query":                                 {query},
-		"wait_end_of_query":                     {"1"},
-		"send_progress_in_http_headers":         {"1"},
-		"input_format_skip_unknown_fields":     {"1"},
+		"query":                             {query},
+		"wait_end_of_query":                 {"1"},
+		"send_progress_in_http_headers":     {"1"},
+		"input_format_skip_unknown_fields":  {"1"},
+		"date_time_input_format":            {"best_effort"},
 	}.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(compressed.Bytes()))

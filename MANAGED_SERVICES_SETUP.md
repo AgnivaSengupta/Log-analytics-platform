@@ -10,9 +10,10 @@ setting in `.env` points at R2 over its S3-compatible API.
 No Tinybird workspace is required. `docker compose up` starts ClickHouse and
 applies `configs/clickhouse/init.sql`, which creates:
 
-- table `logs` (MergeTree, daily partitions, 30-day TTL)
-- insert-only user `logs_append` (workers)
-- select-only user `logs_read` (query coordinator)
+- table `logs` (MergeTree, daily partitions, `ORDER BY (service, timestamp, severity, event_id)`, 30-day TTL, ngram & bloom skip indexes)
+- table `logs_metrics_mv` (SummingMergeTree materialized view for minute-level UI timeline and aggregates)
+- insert user `logs_append` (workers)
+- select user `logs_read` (query coordinator)
 
 | Column | Type |
 | --- | --- |

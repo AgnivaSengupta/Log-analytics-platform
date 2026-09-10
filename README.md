@@ -178,7 +178,7 @@ All configuration is via environment variables (see `.env`):
 | `S3_SECRET_KEY` | (required) | R2 API token secret |
 | `GATEWAY_INGEST_QUOTA_PER_SEC` | `100000` | Per-gateway rate limit |
 | `DETECTION_ERROR_RATE_THRESHOLD` | `0.05` | Error rate alert threshold |
-| `QUERY_HOT_RETENTION_DAYS` | `7` | Days served from ClickHouse before cold |
+| `QUERY_HOT_RETENTION_DAYS` | `30` | Days served from ClickHouse before cold |
 
 The `S3_*` variables configure R2 over its S3-compatible API; no AWS or
 local object store is involved.

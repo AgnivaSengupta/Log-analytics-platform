@@ -104,8 +104,8 @@ func Load() *Config {
 		},
 		Query: QueryConfig{
 			Port:             getEnvInt("QUERY_COORDINATOR_PORT", 8081),
-			HotRetentionDays: getEnvInt("QUERY_HOT_RETENTION_DAYS", 7),
-			MaxScanBytes:     getEnvInt64("QUERY_MAX_SCAN_BYTES", 1073741824),
+			HotRetentionDays: getEnvInt("QUERY_HOT_RETENTION_DAYS", 30),
+			MaxScanBytes:     int64(getEnvInt("QUERY_MAX_SCAN_BYTES", 1073741824)),
 		},
 		Detection: DetectionConfig{
 			WindowMinutes:      getEnvInt("DETECTION_WINDOW_MINUTES", 5),

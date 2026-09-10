@@ -50,34 +50,60 @@ docker compose --profile benchmark build load-generator
 Write-Host ''
 
 function Invoke-LoadTest {
-    param([string]$LogName, [string]$ReportName, [string[]]$LoadArgs)
+    param(
+        [string]$LogName,
+        [string]$ReportName,
+        [string[]]$LoadArgs,
+        [string]$SnapshotLabel = "",
+        [int]$SnapshotDelaySecs = 15
+    )
     Write-Host "--- $LogName ---"
     $logPath = Join-Path $ResultsDir $LogName
+
+    # Schedule background snapshot during active load
+    $job = $null
+    if ($SnapshotLabel) {
+        Write-Host "Scheduled auto-snapshot '$SnapshotLabel' in ${SnapshotDelaySecs}s during peak load..."
+        $job = Start-Job -ScriptBlock {
+            param($snapScript, $resDir, $label, $delay)
+            Start-Sleep -Seconds $delay
+            $env:RUNDIR = $resDir
+            & $snapScript -Label $label
+        } -ArgumentList (Join-Path $ScriptDir 'snapshot.ps1'), $ResultsDir, $SnapshotLabel, $SnapshotDelaySecs
+    }
+
     # NOTE: docker stderr is intentionally left unredirected. Any 2>&1/2>
     # redirection of native stderr can abort this script under
     # $ErrorActionPreference='Stop'; unredirected output just displays.
     docker compose --profile benchmark --progress quiet run --rm -v "${ResultsMount}:/reports" load-generator /bin/service @LoadArgs -report "/reports/$ReportName" | Tee-Object -FilePath $logPath
     if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: load test exited with code $LASTEXITCODE (see docker output above)" }
+
+    if ($job) {
+        Wait-Job $job -Timeout 10 | Out-Null
+        Receive-Job $job | Out-Null
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+    }
     Write-Host ''
 }
 
 Write-Host '==========================================='
 Write-Host '  TEST 1: THROUGHPUT STEPPING (10K -> 100K)'
 Write-Host '==========================================='
-Invoke-LoadTest -LogName 'throughput-test.log' -ReportName 'throughput-report.json' -LoadArgs (@('-gateway', $LoadGatewayUrl, '-step') + $QuickFlag + @('-workers', '20', '-batch', '200', '-error-rate', '0.002'))
+Invoke-LoadTest -LogName 'throughput-test.log' -ReportName 'throughput-report.json' -LoadArgs (@('-gateway', $LoadGatewayUrl, '-step') + $QuickFlag + @('-workers', '20', '-batch', '200', '-error-rate', '0.002')) -SnapshotLabel '01-throughput-stepping-peak' -SnapshotDelaySecs 15
 
 Write-Host '==========================================='
 Write-Host "  TEST 2: SUSTAINED LOAD (50K/sec, ${SustainedSecs}s)"
 Write-Host '==========================================='
-Invoke-LoadTest -LogName 'sustained-test.log' -ReportName 'sustained-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '50000', '-duration', "${SustainedSecs}s", '-workers', '20', '-batch', '200', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'sustained-test.log' -ReportName 'sustained-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '50000', '-duration', "${SustainedSecs}s", '-workers', '20', '-batch', '200', '-error-rate', '0.002') -SnapshotLabel '02-sustained-50k-peak' -SnapshotDelaySecs 30
 
 Write-Host '==========================================='
 Write-Host '  TEST 3: ERROR RATE SPIKE (DETECTION)'
 Write-Host '==========================================='
 Write-Host "Phase 1: Normal traffic (0.2% errors, ${DetectP1Secs}s)..."
-Invoke-LoadTest -LogName 'detection-phase1.log' -ReportName 'detection-phase1-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', "${DetectP1Secs}s", '-workers', '10', '-batch', '100', '-error-rate', '0.002')
+Invoke-LoadTest -LogName 'detection-phase1.log' -ReportName 'detection-phase1-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', "${DetectP1Secs}s", '-workers', '10', '-batch', '100', '-error-rate', '0.002') -SnapshotLabel '03-detection-normal-peak' -SnapshotDelaySecs 12
+
 Write-Host "Phase 2: Error spike (8% errors, ${DetectP2Secs}s)..."
-Invoke-LoadTest -LogName 'detection-phase2.log' -ReportName 'detection-phase2-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', "${DetectP2Secs}s", '-workers', '10', '-batch', '100', '-error-rate', '0.08')
+Invoke-LoadTest -LogName 'detection-phase2.log' -ReportName 'detection-phase2-report.json' -LoadArgs @('-gateway', $LoadGatewayUrl, '-rate', '25000', '-duration', "${DetectP2Secs}s", '-workers', '10', '-batch', '100', '-error-rate', '0.08') -SnapshotLabel '04-detection-spike-peak' -SnapshotDelaySecs 20
 
 Write-Host '==========================================='
 Write-Host '  BENCHMARK COMPLETE'

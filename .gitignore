@@ -43,3 +43,8 @@ benchmark-results/
 
 # Logs
 *.log
+
+# Backups
+backups/
+
+

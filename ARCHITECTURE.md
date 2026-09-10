@@ -290,7 +290,7 @@ not told "consumed" until Tinybird has the rows.
 POST /v1/search { service, severity, search, start_time, end_time, limit, offset }
         │
         ▼
-hotCutoff = now − QUERY_HOT_RETENTION_DAYS (7 d)
+hotCutoff = now − QUERY_HOT_RETENTION_DAYS (30 d)
         │
         ├── end_time <  hotCutoff ──────────────► COLD ONLY
         │                                          R2: list day prefixes in range
@@ -299,7 +299,7 @@ hotCutoff = now − QUERY_HOT_RETENTION_DAYS (7 d)
         │                                          source:"cold",  total = len(scanned matches)
         │
         ├── start_time >  hotCutoff ────────────► HOT ONLY
-        │                                          Tinybird SQL: count() + row page
+        │                                          ClickHouse SQL: count() + row page
         │                                          ORDER BY timestamp DESC LIMIT/OFFSET
         │                                          source:"hot",   total = count()
         │
@@ -895,15 +895,12 @@ replay/dedup and lets a "reprocess one service" job consume one key family.
 *Cost:* hot-service skew, bounded by `service:source` spreading large services
 over several partitions.
 
-### D8. Hot window and hot TTL are separate knobs
+### D8. Hot window is aligned with ClickHouse TTL
 
-Routing (`QUERY_HOT_RETENTION_DAYS=7`) and physical retention (datasource
-`TTL timestamp + INTERVAL 30 DAY`) are decoupled so that the interactive
-experience is priced in the cheapest-to-serve slice while 30 days stay
-*available* in the fast engine for ad-hoc SQL from the Tinybird console.
-*Cost:* days 8–30 are answered from R2 (slow) even though a copy still sits in
-Tinybird — an operator-visible inconsistency worth fixing by aligning the two
-([roadmap R6](#17-roadmap)).
+Routing (`QUERY_HOT_RETENTION_DAYS=30`) and physical retention (`TTL timestamp + INTERVAL 30 DAY`)
+are aligned to 30 days so that all hot queries, timelines, and aggregates within the retention window
+are served directly from ClickHouse at sub-second latencies without unnecessary fallbacks to cold storage.
+
 
 ### D9. Detection state in process memory
 
@@ -1496,7 +1493,7 @@ malformed number silently becomes the default).
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *required* | archive, query | static creds |
 | `S3_ENSURE_BUCKET` | `false` | archive | local-S3 escape hatch only |
 | `GATEWAY_PORT` / `GATEWAY_INGEST_QUOTA_PER_SEC` | 8080 / 100000 | gateway | quota is per process |
-| `QUERY_COORDINATOR_PORT` / `QUERY_HOT_RETENTION_DAYS` | 8081 / 7 | query | routing window, not TTL |
+| `QUERY_COORDINATOR_PORT` / `QUERY_HOT_RETENTION_DAYS` | 8081 / 30 | query | routing window (matches ClickHouse TTL) |
 | `QUERY_MAX_SCAN_BYTES` | 1 GiB | **unused** | cold path uses `maxScanItems = 10000` |
 | `DETECTION_WINDOW_MINUTES` / `_ERROR_RATE_THRESHOLD` / `_MIN_EVENTS` | 5 / 0.05 / 100 | detection | per instance |
 | `ALERT_SERVICE_PORT` | 8082 | **unused** | no HTTP server in alert service |
